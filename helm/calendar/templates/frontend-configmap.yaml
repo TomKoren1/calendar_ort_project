@@ -1,0 +1,28 @@
+# Overrides the nginx.conf baked into the frontend image at build time.
+# The image hardcodes "backend" as the upstream (that's the docker-compose
+# service name); in the cluster the real DNS name is the k8s Service below,
+# so we mount this ConfigMap over /etc/nginx/conf.d/default.conf instead of
+# rebuilding the image per-environment.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "calendar.frontend.fullname" . }}-nginx
+  labels:
+    {{- include "calendar.labels" . | nindent 4 }}
+    app.kubernetes.io/component: frontend
+data:
+  default.conf: |
+    server {
+      listen 80;
+
+      location /api/ {
+        proxy_pass http://{{ include "calendar.backend.fullname" . }}:{{ .Values.backend.service.port }}/api/;
+        proxy_set_header Host $host;
+      }
+
+      location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri /index.html;
+      }
+    }

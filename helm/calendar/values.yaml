@@ -1,0 +1,62 @@
+# Default values for the calendar chart.
+# Override per-environment with -f values-staging.yaml / -f values-prod.yaml
+
+backend:
+  image:
+    repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-backend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  containerPort: 3001
+  service:
+    port: 3001
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  probes:
+    path: /api/health
+  env:
+    PORT: "3001"
+  # Secret must already exist in the cluster (created by hand, Terraform, or
+  # External Secrets Operator syncing from AWS Secrets Manager) and contain
+  # a key named DATABASE_URL. This chart does not create it.
+  existingSecret: calendar-db-credentials
+  existingSecretKey: DATABASE_URL
+
+frontend:
+  image:
+    repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  replicaCount: 2
+  containerPort: 80
+  service:
+    port: 80
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 64Mi
+
+# Runs node-pg-migrate (via the backend image) once per install/upgrade,
+# before backend pods roll out, so replicas never race each other applying
+# schema changes.
+migration:
+  enabled: true
+
+ingress:
+  enabled: true
+  className: alb
+  host: calendar.example.com
+  annotations:
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+  tls:
+    enabled: true
+    secretName: calendar-tls

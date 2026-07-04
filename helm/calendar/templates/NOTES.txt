@@ -1,0 +1,12 @@
+Calendar chart deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
+
+{{- if .Values.ingress.enabled }}
+App URL: https://{{ .Values.ingress.host }}
+{{- else }}
+Ingress is disabled. Port-forward to reach it:
+  kubectl port-forward svc/{{ include "calendar.frontend.fullname" . }} 8080:{{ .Values.frontend.service.port }}
+{{- end }}
+
+Backend health check:
+  kubectl port-forward svc/{{ include "calendar.backend.fullname" . }} 3001:{{ .Values.backend.service.port }}
+  curl http://localhost:3001/api/health

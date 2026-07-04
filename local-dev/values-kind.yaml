@@ -1,0 +1,18 @@
+# Overrides for testing the chart against a local kind cluster.
+backend:
+  image:
+    repository: calendar-backend
+    tag: local
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+
+frontend:
+  image:
+    repository: calendar-frontend
+    tag: local
+    pullPolicy: IfNotPresent
+  replicaCount: 1
+
+# kind has no AWS ALB controller; reach the app via port-forward instead.
+ingress:
+  enabled: false
