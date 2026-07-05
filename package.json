@@ -1,0 +1,11 @@
+{
+  "name": "calendar",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "devDependencies": {
+    "nx": "23.0.1"
+  }
+}

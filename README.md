@@ -5,6 +5,13 @@ A calendar app: React (Vite) frontend, Express + Postgres backend, containerized
 ## Project structure
 
 ```
+package.json         npm workspaces root: ["backend", "frontend"] — single
+                      package-lock.json/node_modules for both projects
+nx.json               NX config (task caching, target defaults) — see
+                      "Monorepo tooling (NX)" below
+.dockerignore         single root-level ignore file (both Dockerfiles now
+                      build from repo-root context, see below)
+
 backend/            Express API
   app.js             Express app (routes, middleware, error handling) — imported by tests
   server.js          entrypoint: imports app.js, starts listening
@@ -54,6 +61,25 @@ Tear down (and drop the Postgres volume, for a clean slate):
 docker compose down -v
 ```
 
+## Monorepo tooling (NX)
+
+`backend` and `frontend` are managed as an npm workspace (single root `package-lock.json`), with
+[NX](https://nx.dev) layered on top for task running. NX infers its targets directly from each
+project's existing `package.json` scripts — no extra config needed. Project names come from each
+`package.json`'s `"name"` field (the backend project is `calendar-backend`, not `backend`).
+
+```
+npm install                          # installs both workspaces at once
+npx nx show projects                  # list detected projects
+npx nx show project calendar-backend   # see a project's inferred targets
+npx nx run frontend:build              # run a single target (results are cached locally)
+npx nx run calendar-backend:test        # requires a running, migrated Postgres — see below
+```
+
+Because `backend` and `frontend` share no code or dependencies today, NX's caching/affected-detection
+benefits are modest at this size — it's set up here as groundwork for the CI pipeline (`nx affected`)
+and to learn the tool, not because the repo needs it yet.
+
 ## Running the backend tests
 
 Tests are real integration tests against a real, migrated Postgres — no mocking.
@@ -93,8 +119,8 @@ helm install calendar ./helm/calendar \
 ```
 kind create cluster --name calendar-dev
 
-docker build -t calendar-backend:local ./backend
-docker build -t calendar-frontend:local ./frontend
+docker build -f backend/Dockerfile -t calendar-backend:local .
+docker build -f frontend/Dockerfile -t calendar-frontend:local .
 kind load docker-image calendar-backend:local calendar-frontend:local --name calendar-dev
 
 kubectl apply -f local-dev/kind-postgres.yaml
