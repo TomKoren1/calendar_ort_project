@@ -7,8 +7,8 @@ STEP 1 — CI/CD & Monorepo tooling direction
 ============================================================
 - Build a generic GitHub Actions setup using reusable actions/workflows where possible
   (shared across backend/frontend rather than duplicated per-package pipelines).
-- Adopt a monorepo management tool — NX under consideration — to manage the
-  backend/frontend as a monorepo (task orchestration, caching, affected-project builds).
+- Monorepo tooling: NX was evaluated (see 1a below) and dropped as overkill for 2
+  unrelated projects — kept the npm workspace (single lockfile) without NX on top.
 - Push built images to Amazon ECR.
 - Use OIDC (GitHub Actions OIDC provider -> AWS IAM role) for authentication to AWS,
   instead of long-lived AWS access keys stored as secrets.
@@ -16,7 +16,11 @@ STEP 1 — CI/CD & Monorepo tooling direction
 Sub-step order decided (2026-07-05):
   1a. NX monorepo setup for backend/frontend (done first — changes how tasks are
       invoked, so the CI refactor in 1b is written against NX from the start).
-  1b. GitHub Actions reusable-workflow refactor, calling NX task commands.
+      [Revised 2026-07-06: NX removed after trying it, see below — 1a is now just
+      the npm workspace, no NX.]
+  1b. GitHub Actions reusable-workflow refactor: two independent workflows
+      (backend, frontend), sharing logic via reusable workflows/composite actions
+      where it makes sense, instead of NX task orchestration.
   1c. Bootstrap Terraform (small, separate stack, e.g. infra/bootstrap/) — creates
       just the ECR repositories + GitHub OIDC provider + IAM role needed for CI.
       This is intentionally separate from Step 4's full VPC/EKS/RDS Terraform,
@@ -48,7 +52,17 @@ STATUS: in progress.
     frontend/package.json. Verified backend + frontend Docker images build, and
     the full docker-compose stack serves /api/health and / correctly.
 
-NEXT: 1b — GitHub Actions reusable-workflow refactor, calling NX task commands.
+REVISED (2026-07-06): after using it, decided NX is overkill for just 2 unrelated
+projects with no shared code/dependencies — the caching/affected-detection value
+it brings doesn't justify the extra tool for this repo's size. Removed nx.json,
+the nx devDependency, the NX Claude-plugin entries in .claude/settings.json, and
+the NX-generated block in CLAUDE.md. Kept the npm workspace (single lockfile) —
+that part still stands on its own merits (one `npm install`, no Dockerfile churn
+needed to revert). 1b will be two independent GitHub Actions workflows instead of
+NX-orchestrated task running.
+
+NEXT: 1b — two independent GitHub Actions workflows (backend, frontend), reusable
+workflows/composite actions where they reduce duplication.
 
 ============================================================
 STEP 2 — Umbrella Helm chart

@@ -7,8 +7,6 @@ A calendar app: React (Vite) frontend, Express + Postgres backend, containerized
 ```
 package.json         npm workspaces root: ["backend", "frontend"] — single
                       package-lock.json/node_modules for both projects
-nx.json               NX config (task caching, target defaults) — see
-                      "Monorepo tooling (NX)" below
 .dockerignore         single root-level ignore file (both Dockerfiles now
                       build from repo-root context, see below)
 
@@ -61,24 +59,17 @@ Tear down (and drop the Postgres volume, for a clean slate):
 docker compose down -v
 ```
 
-## Monorepo tooling (NX)
+## Monorepo tooling
 
-`backend` and `frontend` are managed as an npm workspace (single root `package-lock.json`), with
-[NX](https://nx.dev) layered on top for task running. NX infers its targets directly from each
-project's existing `package.json` scripts — no extra config needed. Project names come from each
-`package.json`'s `"name"` field (the backend project is `calendar-backend`, not `backend`).
+`backend` and `frontend` are managed as a single npm workspace (`package.json`'s `"workspaces"`
+field) — one root `package-lock.json`/`node_modules` for both, installed with a single `npm
+install` from the repo root. Each project's own scripts still run normally from its own folder
+(`cd backend && npm test`, `cd frontend && npm run build`, etc).
 
-```
-npm install                          # installs both workspaces at once
-npx nx show projects                  # list detected projects
-npx nx show project calendar-backend   # see a project's inferred targets
-npx nx run frontend:build              # run a single target (results are cached locally)
-npx nx run calendar-backend:test        # requires a running, migrated Postgres — see below
-```
-
-Because `backend` and `frontend` share no code or dependencies today, NX's caching/affected-detection
-benefits are modest at this size — it's set up here as groundwork for the CI pipeline (`nx affected`)
-and to learn the tool, not because the repo needs it yet.
+NX was evaluated and set up briefly here (task graph, inferred targets, local caching) but removed:
+with only 2 projects that share zero code or dependencies, NX's caching/affected-detection benefits
+didn't justify the added tooling for this repo's size. CI instead uses two independent GitHub
+Actions workflows (see CI/CD below) rather than an NX-orchestrated pipeline.
 
 ## Running the backend tests
 
