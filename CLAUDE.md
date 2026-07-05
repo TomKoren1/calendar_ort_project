@@ -111,8 +111,9 @@ full kind workflow).
   baked into the frontend build.
 - Helm chart (`helm/calendar/`) currently deploys backend + frontend as one flat chart (this is
   planned to become an umbrella chart with backend/frontend as subcharts — see `workplan.txt` Step 2).
-- CI (`.github/workflows/ci.yml`): on every push/PR, spins up a Postgres service container, runs
-  migrations, runs backend tests. On push to `main` only (and only if tests pass), builds both
-  Docker images and pushes to GHCR tagged with both the git SHA and `latest` — use the SHA tag for
-  anything real, `latest` is a moving pointer only. This pipeline is being reworked per
-  `workplan.txt` Step 1 (reusable workflows, monorepo tool, ECR + OIDC instead of GHCR).
+- CI is split into two independent, path-filtered workflows —
+  `.github/workflows/backend-ci.yml` and `.github/workflows/frontend-ci.yml` — each only triggers
+  on changes to its own folder (or the shared root `package.json`/`package-lock.json`). Each runs
+  its own tests/lint+build, then on push to `main` only, builds and pushes just its own image to
+  GHCR (SHA + `latest` tags — use SHA for anything real). Still on GHCR for now; ECR + OIDC is
+  `workplan.txt` Step 1c/1d.

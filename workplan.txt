@@ -61,8 +61,20 @@ that part still stands on its own merits (one `npm install`, no Dockerfile churn
 needed to revert). 1b will be two independent GitHub Actions workflows instead of
 NX-orchestrated task running.
 
-NEXT: 1b — two independent GitHub Actions workflows (backend, frontend), reusable
-workflows/composite actions where they reduce duplication.
+1b DONE (2026-07-06):
+  - Replaced .github/workflows/ci.yml with two independent, path-filtered
+    workflows: backend-ci.yml (paths: backend/**, root package.json/lockfile)
+    and frontend-ci.yml (paths: frontend/**, root package.json/lockfile).
+  - Decided against extracting a shared reusable workflow for the common
+    checkout+setup-node+npm-ci opening — same "not worth it at this size"
+    judgment as dropping NX; revisit if a third workflow/project appears.
+  - Each workflow still gates its own build-and-push job on
+    `github.event_name == 'push' && github.ref == 'refs/heads/main'`, and only
+    builds/pushes its own image (backend or frontend), not both.
+  - Verified both files are valid YAML (js-yaml parse). Still pushing to GHCR —
+    ECR + OIDC is 1c/1d.
+
+NEXT: 1c — bootstrap Terraform for ECR repositories + GitHub OIDC provider/IAM role.
 
 ============================================================
 STEP 2 — Umbrella Helm chart

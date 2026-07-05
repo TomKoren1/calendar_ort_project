@@ -125,6 +125,16 @@ Then open **http://localhost:8080**.
 
 ## CI/CD
 
-`.github/workflows/ci.yml`:
-- **On every push/PR**: spins up a Postgres service container, runs migrations, runs the backend test suite.
-- **On push to `main`** (only if tests pass): builds both images, tags them with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-backend` and `.../calendar-frontend`. Use the SHA tag for anything real — `latest` is a convenience pointer only.
+Two independent workflows, each triggered only by changes relevant to it (via `paths:` filters —
+a PR that only touches `frontend/` never runs backend CI, and vice versa). Both watch the root
+`package.json`/`package-lock.json` too, since that's the shared npm workspace lockfile.
+
+`.github/workflows/backend-ci.yml`:
+- **On every push/PR touching `backend/**` or the root lockfile**: spins up a Postgres service container, runs migrations, runs the backend test suite.
+- **On push to `main`** (only if tests pass): builds the backend image, tags it with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-backend`.
+
+`.github/workflows/frontend-ci.yml`:
+- **On every push/PR touching `frontend/**` or the root lockfile**: lints (`oxlint`) and builds (`vite build`) the frontend.
+- **On push to `main`** (only if lint/build pass): builds the frontend image, tags it with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-frontend`.
+
+Use the SHA tag for anything real — `latest` is a convenience pointer only.
