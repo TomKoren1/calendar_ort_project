@@ -131,10 +131,26 @@ a PR that only touches `frontend/` never runs backend CI, and vice versa). Both 
 
 `.github/workflows/backend-ci.yml`:
 - **On every push/PR touching `backend/**` or the root lockfile**: spins up a Postgres service container, runs migrations, runs the backend test suite.
-- **On push to `main`** (only if tests pass): builds the backend image, tags it with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-backend`.
+- **On push to `main`** (only if tests pass): builds the backend image and pushes it to Amazon ECR.
 
 `.github/workflows/frontend-ci.yml`:
 - **On every push/PR touching `frontend/**` or the root lockfile**: lints (`oxlint`) and builds (`vite build`) the frontend.
-- **On push to `main`** (only if lint/build pass): builds the frontend image, tags it with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-frontend`.
+- **On push to `main`** (only if lint/build pass): builds the frontend image and pushes it to Amazon ECR.
 
-Use the SHA tag for anything real — `latest` is a convenience pointer only.
+Both images are tagged with the git commit SHA and `latest` — use the SHA tag for anything real,
+`latest` is a convenience pointer only.
+
+### Authentication: GitHub OIDC, no stored AWS keys
+
+Both `build-and-push` jobs authenticate to AWS via **OpenID Connect**, not long-lived access keys:
+GitHub issues a short-lived signed token for the running job (`permissions: id-token: write`),
+`aws-actions/configure-aws-credentials` exchanges it for temporary AWS credentials by assuming an
+IAM role, and `aws-actions/amazon-ecr-login` uses those to log Docker in to ECR. The role's trust
+policy only allows `push` events on `main` in this exact repo to assume it — a PR, a fork, or a
+different branch is rejected by AWS itself before the role's permissions even matter.
+
+The AWS side of this (the ECR repositories, the OIDC provider, and the IAM role) is provisioned by
+Terraform in `infra/bootstrap/` — see that folder's README. The workflows reference the role ARN
+and AWS region via GitHub Actions repository **Variables** (`AWS_GITHUB_ACTIONS_ROLE_ARN`,
+`AWS_REGION`) rather than hardcoding them, since neither value is secret but both are
+repo/account-specific.

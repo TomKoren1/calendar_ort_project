@@ -95,9 +95,25 @@ NX-orchestrated task running.
     github_actions_role_arn (arn:aws:iam::672299759593:role/calendar-github-actions-ecr-push) —
     needed for 1d.
 
-NEXT: 1d — wire backend-ci.yml/frontend-ci.yml to assume the IAM role via
-OIDC (aws-actions/configure-aws-credentials + amazon-ecr-login) and push to
-ECR instead of GHCR.
+1d DONE (2026-07-06):
+  - Both workflows' build-and-push jobs: swapped docker/login-action (ghcr.io +
+    GITHUB_TOKEN) for aws-actions/configure-aws-credentials@v4 (role-to-assume
+    via OIDC) + aws-actions/amazon-ecr-login@v2. Removed the now-unneeded
+    "compute lowercase image namespace" step (GHCR-only concern) and
+    `packages: write` permission; added `id-token: write` (required to request
+    the OIDC token at all).
+  - Registry URL comes from amazon-ecr-login's `registry` output, not
+    hardcoded — the only repo-specific values in the YAML are two GitHub
+    Actions repo Variables (not secrets, added via the UI):
+    AWS_REGION=us-east-1, AWS_GITHUB_ACTIONS_ROLE_ARN=<role arn from 1c>.
+  - Both files validated as YAML (js-yaml parse). Real end-to-end proof
+    (an actual push to main triggering a successful ECR push) still pending
+    until this PR is merged.
+
+STEP 1 (CI/CD & monorepo tooling) COMPLETE: 1a (npm workspace, NX tried and
+removed) -> 1b (path-filtered backend/frontend workflows) -> 1c (ECR + GitHub
+OIDC bootstrap Terraform) -> 1d (workflows push to ECR via OIDC instead of
+GHCR). README.md updated to describe this as the current, real CI/CD setup.
 
 ============================================================
 STEP 2 — Umbrella Helm chart
