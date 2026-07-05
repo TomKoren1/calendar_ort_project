@@ -74,7 +74,46 @@ NX-orchestrated task running.
   - Verified both files are valid YAML (js-yaml parse). Still pushing to GHCR —
     ECR + OIDC is 1c/1d.
 
-NEXT: 1c — bootstrap Terraform for ECR repositories + GitHub OIDC provider/IAM role.
+1c DONE (2026-07-06):
+  - Wrote infra/bootstrap/ (versions.tf, provider.tf, variables.tf, ecr.tf,
+    oidc.tf, outputs.tf, README.md) — local Terraform state (deliberate, see
+    that module's README for why).
+  - Installed Terraform + AWS CLI locally, created an IAM user
+    (terraform-bootstrap) with AdministratorAccess for now (broad, tracked as
+    a simplification for the learning account — revisit with a scoped policy
+    later), configured via `aws configure`.
+  - Hit and fixed a real incident: a live AWS secret access key got pasted
+    into chat during setup. Rotated/deleted it immediately and generated a
+    fresh one entered only via `aws configure`, never in chat.
+  - terraform plan reviewed line-by-line before apply: trust policy correctly
+    scoped to repo:TomKoren1/calendar_ort_project:ref:refs/heads/main (not
+    broader), thumbprint dynamically fetched (not hardcoded/stale), ECR push
+    IAM policy scoped to the two repo ARNs (only GetAuthorizationToken is
+    unscoped, as AWS requires).
+  - terraform apply: 8 resources created, 0 changed, 0 destroyed. Outputs:
+    ecr_backend_repository_url, ecr_frontend_repository_url,
+    github_actions_role_arn (arn:aws:iam::672299759593:role/calendar-github-actions-ecr-push) —
+    needed for 1d.
+
+1d DONE (2026-07-06):
+  - Both workflows' build-and-push jobs: swapped docker/login-action (ghcr.io +
+    GITHUB_TOKEN) for aws-actions/configure-aws-credentials@v4 (role-to-assume
+    via OIDC) + aws-actions/amazon-ecr-login@v2. Removed the now-unneeded
+    "compute lowercase image namespace" step (GHCR-only concern) and
+    `packages: write` permission; added `id-token: write` (required to request
+    the OIDC token at all).
+  - Registry URL comes from amazon-ecr-login's `registry` output, not
+    hardcoded — the only repo-specific values in the YAML are two GitHub
+    Actions repo Variables (not secrets, added via the UI):
+    AWS_REGION=us-east-1, AWS_GITHUB_ACTIONS_ROLE_ARN=<role arn from 1c>.
+  - Both files validated as YAML (js-yaml parse). Real end-to-end proof
+    (an actual push to main triggering a successful ECR push) still pending
+    until this PR is merged.
+
+STEP 1 (CI/CD & monorepo tooling) COMPLETE: 1a (npm workspace, NX tried and
+removed) -> 1b (path-filtered backend/frontend workflows) -> 1c (ECR + GitHub
+OIDC bootstrap Terraform) -> 1d (workflows push to ECR via OIDC instead of
+GHCR). README.md updated to describe this as the current, real CI/CD setup.
 
 ============================================================
 STEP 2 — Umbrella Helm chart

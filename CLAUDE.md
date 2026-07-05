@@ -114,6 +114,7 @@ full kind workflow).
 - CI is split into two independent, path-filtered workflows —
   `.github/workflows/backend-ci.yml` and `.github/workflows/frontend-ci.yml` — each only triggers
   on changes to its own folder (or the shared root `package.json`/`package-lock.json`). Each runs
-  its own tests/lint+build, then on push to `main` only, builds and pushes just its own image to
-  GHCR (SHA + `latest` tags — use SHA for anything real). Still on GHCR for now; ECR + OIDC is
-  `workplan.txt` Step 1c/1d.
+  its own tests/lint+build, then on push to `main` only, authenticates to AWS via GitHub OIDC
+  (`aws-actions/configure-aws-credentials` + `amazon-ecr-login`, no stored AWS keys) and pushes
+  just its own image to Amazon ECR (SHA + `latest` tags — use SHA for anything real). The ECR
+  repos/OIDC provider/IAM role are provisioned by Terraform in `infra/bootstrap/`.
