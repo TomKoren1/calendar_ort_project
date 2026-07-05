@@ -5,6 +5,11 @@ A calendar app: React (Vite) frontend, Express + Postgres backend, containerized
 ## Project structure
 
 ```
+package.json         npm workspaces root: ["backend", "frontend"] — single
+                      package-lock.json/node_modules for both projects
+.dockerignore         single root-level ignore file (both Dockerfiles now
+                      build from repo-root context, see below)
+
 backend/            Express API
   app.js             Express app (routes, middleware, error handling) — imported by tests
   server.js          entrypoint: imports app.js, starts listening
@@ -54,6 +59,18 @@ Tear down (and drop the Postgres volume, for a clean slate):
 docker compose down -v
 ```
 
+## Monorepo tooling
+
+`backend` and `frontend` are managed as a single npm workspace (`package.json`'s `"workspaces"`
+field) — one root `package-lock.json`/`node_modules` for both, installed with a single `npm
+install` from the repo root. Each project's own scripts still run normally from its own folder
+(`cd backend && npm test`, `cd frontend && npm run build`, etc).
+
+NX was evaluated and set up briefly here (task graph, inferred targets, local caching) but removed:
+with only 2 projects that share zero code or dependencies, NX's caching/affected-detection benefits
+didn't justify the added tooling for this repo's size. CI instead uses two independent GitHub
+Actions workflows (see CI/CD below) rather than an NX-orchestrated pipeline.
+
 ## Running the backend tests
 
 Tests are real integration tests against a real, migrated Postgres — no mocking.
@@ -93,8 +110,8 @@ helm install calendar ./helm/calendar \
 ```
 kind create cluster --name calendar-dev
 
-docker build -t calendar-backend:local ./backend
-docker build -t calendar-frontend:local ./frontend
+docker build -f backend/Dockerfile -t calendar-backend:local .
+docker build -f frontend/Dockerfile -t calendar-frontend:local .
 kind load docker-image calendar-backend:local calendar-frontend:local --name calendar-dev
 
 kubectl apply -f local-dev/kind-postgres.yaml
@@ -108,6 +125,16 @@ Then open **http://localhost:8080**.
 
 ## CI/CD
 
-`.github/workflows/ci.yml`:
-- **On every push/PR**: spins up a Postgres service container, runs migrations, runs the backend test suite.
-- **On push to `main`** (only if tests pass): builds both images, tags them with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-backend` and `.../calendar-frontend`. Use the SHA tag for anything real — `latest` is a convenience pointer only.
+Two independent workflows, each triggered only by changes relevant to it (via `paths:` filters —
+a PR that only touches `frontend/` never runs backend CI, and vice versa). Both watch the root
+`package.json`/`package-lock.json` too, since that's the shared npm workspace lockfile.
+
+`.github/workflows/backend-ci.yml`:
+- **On every push/PR touching `backend/**` or the root lockfile**: spins up a Postgres service container, runs migrations, runs the backend test suite.
+- **On push to `main`** (only if tests pass): builds the backend image, tags it with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-backend`.
+
+`.github/workflows/frontend-ci.yml`:
+- **On every push/PR touching `frontend/**` or the root lockfile**: lints (`oxlint`) and builds (`vite build`) the frontend.
+- **On push to `main`** (only if lint/build pass): builds the frontend image, tags it with the git commit SHA and `latest`, pushes to `ghcr.io/<owner>/calendar-frontend`.
+
+Use the SHA tag for anything real — `latest` is a convenience pointer only.

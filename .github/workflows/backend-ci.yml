@@ -1,10 +1,20 @@
-name: CI
+name: Backend CI
 
 on:
   push:
     branches: [main]
+    paths:
+      - "backend/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/backend-ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "backend/**"
+      - "package.json"
+      - "package-lock.json"
+      - ".github/workflows/backend-ci.yml"
 
 jobs:
   test:
@@ -32,10 +42,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: backend/package-lock.json
+          cache-dependency-path: package-lock.json
 
-      - name: Install backend dependencies
-        working-directory: backend
+      - name: Install dependencies (npm workspaces - backend + frontend)
         run: npm ci
 
       - name: Run migrations
@@ -71,17 +80,9 @@ jobs:
       - name: Build and push backend image
         uses: docker/build-push-action@v6
         with:
-          context: ./backend
+          context: .
+          file: backend/Dockerfile
           push: true
           tags: |
             ghcr.io/${{ steps.vars.outputs.owner }}/calendar-backend:${{ github.sha }}
             ghcr.io/${{ steps.vars.outputs.owner }}/calendar-backend:latest
-
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: ./frontend
-          push: true
-          tags: |
-            ghcr.io/${{ steps.vars.outputs.owner }}/calendar-frontend:${{ github.sha }}
-            ghcr.io/${{ steps.vars.outputs.owner }}/calendar-frontend:latest

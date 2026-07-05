@@ -1,0 +1,162 @@
+CALENDAR APP — DEVOPS WORKPLAN
+Living document, built step by step per instructions from the user's expert advisor.
+Purpose: this is a DevOps-focused project (CI/CD, infra, tooling) — not a code-feature project.
+
+============================================================
+STEP 1 — CI/CD & Monorepo tooling direction
+============================================================
+- Build a generic GitHub Actions setup using reusable actions/workflows where possible
+  (shared across backend/frontend rather than duplicated per-package pipelines).
+- Monorepo tooling: NX was evaluated (see 1a below) and dropped as overkill for 2
+  unrelated projects — kept the npm workspace (single lockfile) without NX on top.
+- Push built images to Amazon ECR.
+- Use OIDC (GitHub Actions OIDC provider -> AWS IAM role) for authentication to AWS,
+  instead of long-lived AWS access keys stored as secrets.
+
+Sub-step order decided (2026-07-05):
+  1a. NX monorepo setup for backend/frontend (done first — changes how tasks are
+      invoked, so the CI refactor in 1b is written against NX from the start).
+      [Revised 2026-07-06: NX removed after trying it, see below — 1a is now just
+      the npm workspace, no NX.]
+  1b. GitHub Actions reusable-workflow refactor: two independent workflows
+      (backend, frontend), sharing logic via reusable workflows/composite actions
+      where it makes sense, instead of NX task orchestration.
+  1c. Bootstrap Terraform (small, separate stack, e.g. infra/bootstrap/) — creates
+      just the ECR repositories + GitHub OIDC provider + IAM role needed for CI.
+      This is intentionally separate from Step 4's full VPC/EKS/RDS Terraform,
+      since the CI/CD tooling has to exist before the "real" infra it would
+      normally help deploy.
+  1d. Wire the GitHub Actions workflow to assume the IAM role via OIDC and push
+      images to ECR.
+
+STATUS: in progress.
+
+1a DONE (2026-07-05):
+  - Added root package.json with npm workspaces ["backend", "frontend"] — single
+    root package-lock.json/node_modules now, replacing the two independent lockfiles.
+  - Ran `nx init` (nx 23) at the repo root — inferred tasks from each project's
+    existing package.json scripts (test/build/lint/etc.), no project.json needed.
+    Verified: `npx nx show projects`, `npx nx run frontend:build` (+ cache hit on
+    rerun), `npx nx run calendar-backend:test` (all 17 backend tests pass against
+    a real Postgres). Declined Nx Cloud remote caching — local caching only, no
+    external account needed for this project.
+  - Consequence of npm workspaces: both Dockerfiles + docker-compose.yml build
+    contexts changed from per-folder to repo-root (so `npm ci` can see the shared
+    lockfile); consolidated the two .dockerignore files into one at repo root;
+    ci.yml's existing test/build-and-push jobs patched minimally to match (not
+    yet the full reusable-workflow rewrite — that's 1b).
+  - Hit and fixed a real npm workspaces gotcha: nested native-binary
+    optionalDependencies (vite's rolldown bundler, and lightningcss) don't
+    auto-resolve the correct platform variant inside a workspace; fixed by adding
+    the needed Linux variants as explicit optionalDependencies directly on
+    frontend/package.json. Verified backend + frontend Docker images build, and
+    the full docker-compose stack serves /api/health and / correctly.
+
+REVISED (2026-07-06): after using it, decided NX is overkill for just 2 unrelated
+projects with no shared code/dependencies — the caching/affected-detection value
+it brings doesn't justify the extra tool for this repo's size. Removed nx.json,
+the nx devDependency, the NX Claude-plugin entries in .claude/settings.json, and
+the NX-generated block in CLAUDE.md. Kept the npm workspace (single lockfile) —
+that part still stands on its own merits (one `npm install`, no Dockerfile churn
+needed to revert). 1b will be two independent GitHub Actions workflows instead of
+NX-orchestrated task running.
+
+1b DONE (2026-07-06):
+  - Replaced .github/workflows/ci.yml with two independent, path-filtered
+    workflows: backend-ci.yml (paths: backend/**, root package.json/lockfile)
+    and frontend-ci.yml (paths: frontend/**, root package.json/lockfile).
+  - Decided against extracting a shared reusable workflow for the common
+    checkout+setup-node+npm-ci opening — same "not worth it at this size"
+    judgment as dropping NX; revisit if a third workflow/project appears.
+  - Each workflow still gates its own build-and-push job on
+    `github.event_name == 'push' && github.ref == 'refs/heads/main'`, and only
+    builds/pushes its own image (backend or frontend), not both.
+  - Verified both files are valid YAML (js-yaml parse). Still pushing to GHCR —
+    ECR + OIDC is 1c/1d.
+
+NEXT: 1c — bootstrap Terraform for ECR repositories + GitHub OIDC provider/IAM role.
+
+============================================================
+STEP 2 — Umbrella Helm chart
+============================================================
+- Convert the current single Helm chart (helm/calendar/) into a generic umbrella
+  chart: a top-level parent chart with "frontend" and "backend" as subcharts
+  underneath it.
+- Each subchart owns its own templates/values (deployment, service, etc. currently
+  under helm/calendar/templates/backend-*.yaml and frontend-*.yaml would move into
+  helm/calendar/charts/backend/ and helm/calendar/charts/frontend/ respectively).
+- Parent chart's values.yaml holds shared/global config and per-subchart overrides
+  (e.g. global.image.registry, global.env), subcharts expose their own defaults.
+- Shared resources that don't belong to either service (ingress, migration-job,
+  any cross-cutting config) stay at the umbrella/parent level.
+
+(Awaiting further detail/confirmation on this step before moving to implementation.)
+
+============================================================
+STEP 3 — Argo CD / GitOps deployment
+============================================================
+- Deploy the umbrella chart (from Step 2) via Argo CD rather than manual
+  helm install/upgrade.
+- Use an ApplicationSet to generate Argo CD Applications (e.g. per
+  environment/cluster, or per subchart) instead of hand-written Application
+  manifests per target.
+- Consider an "app of apps" pattern: a root Argo CD Application that points at
+  a repo/dir of child Application manifests, so the whole environment is
+  bootstrapped from one entry point.
+- Full GitOps model: Git is the source of truth for desired state; CI (Step 1)
+  builds/pushes images and updates the manifest/values repo (e.g. bumping an
+  image tag), Argo CD detects the change and syncs the cluster — no direct
+  `helm upgrade`/`kubectl apply` from CI.
+
+(Awaiting further detail/confirmation on this step before moving to implementation.)
+
+============================================================
+STEP 4 — Terraform: VPC, EKS, cluster add-ons, RDS
+============================================================
+- Provision networking and compute with Terraform, built from modules (prefer
+  well-maintained community modules, e.g. terraform-aws-modules/vpc and
+  terraform-aws-modules/eks, over hand-rolled resources) rather than one flat
+  root module.
+- VPC: public/private subnets across multiple AZs, NAT gateway(s), private
+  subnets for worker nodes and RDS.
+- EKS cluster with:
+  - Cluster Autoscaler (or Karpenter as a modern alternative — worth deciding
+    between the two) for node scaling.
+  - AWS Load Balancer Controller (ALB controller) to provision a cloud ALB/NLB
+    from a Kubernetes Ingress/Service of type LoadBalancer.
+  - VPC CNI addon (pod networking) and EBS/EFS CSI driver addon (persistent
+    storage) — install as managed EKS add-ons where possible.
+  - An Ingress controller (via the ALB controller above) so Kubernetes Ingress
+    resources provision a real cloud load balancer.
+- RDS for the Postgres database instead of the in-cluster/Docker Compose
+  Postgres used today — best practices: private subnet only (no public
+  access), Multi-AZ for prod, encrypted storage, credentials via AWS Secrets
+  Manager (or SSM Parameter Store) rather than plain Terraform variables,
+  automated backups/snapshots, parameter group tuned for the workload.
+- Terraform best practices to apply: remote state (S3 backend + DynamoDB lock
+  table), separate state/workspaces per environment, module versioning, least-
+  privilege IAM (ties into Step 1's GitHub OIDC role and the ALB
+  controller/CSI/autoscaler each needing their own scoped IAM roles via IRSA).
+
+(Awaiting further detail/confirmation on this step before moving to implementation.)
+
+============================================================
+STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
+============================================================
+- Base step: install kube-prometheus-stack in the cluster (via Argo CD from
+  Step 3) to get default cluster/node monitoring, Prometheus, Alertmanager,
+  and Grafana out of the box.
+- Down the road, extend beyond the stack's default monitoring for the app's
+  own services:
+  - Add ServiceMonitor resources as new templates in the umbrella chart
+    (Step 2) — one per service that exposes metrics, so Prometheus scrapes
+    the calendar app itself, not just cluster/node metrics.
+  - Add Grafana dashboards as ConfigMaps (using the standard
+    grafana_dashboard label so kube-prometheus-stack's sidecar picks them up)
+    as new templates in the chart, versioned alongside the app.
+- Preparation now, so the app is ready when this is wired up: add a /metrics
+  endpoint to the backend (e.g. prom-client for Node/Express) exposing basic
+  request/latency/error counters — build it in ahead of time even though
+  nothing scrapes it yet.
+
+(Awaiting further detail/confirmation on this step before moving to implementation.)

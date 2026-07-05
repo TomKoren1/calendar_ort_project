@@ -2,10 +2,16 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-COPY package*.json ./
-RUN npm ci --omit=dev
+# Copy just the workspace manifests first so this layer only invalidates when
+# a package.json/lockfile actually changes, not on every source edit.
+COPY package.json package-lock.json ./
+COPY backend/package.json backend/package.json
+COPY frontend/package.json frontend/package.json
+RUN npm ci --workspace=calendar-backend --omit=dev
 
-COPY . .
+COPY backend/ backend/
+
+WORKDIR /app/backend
 
 EXPOSE 3001
 
