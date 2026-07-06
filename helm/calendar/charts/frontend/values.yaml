@@ -3,20 +3,16 @@
 
 image:
   repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-frontend
-  tag: latest
+  tag: d205e2a880b88d2f0bea0bcc75f85d85e81b6089
   pullPolicy: IfNotPresent
-
 # Empty by default (public/no-registry-auth images). Set when pulling from a
 # private registry the node has no other credentials for - see backend's
 # values.yaml for the full explanation.
 imagePullSecrets: []
-
 replicaCount: 2
 containerPort: 80
-
 service:
   port: 80
-
 resources:
   requests:
     cpu: 50m
