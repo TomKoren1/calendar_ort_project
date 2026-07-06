@@ -4,21 +4,17 @@
 
 image:
   repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-backend
-  tag: latest
+  tag: d205e2a880b88d2f0bea0bcc75f85d85e81b6089
   pullPolicy: IfNotPresent
-
 # Empty by default (public/no-registry-auth images). Set when pulling from a
 # private registry the node has no other credentials for - e.g. ECR from a
 # kind cluster with no IAM identity of its own (see local-dev/README or
 # workplan.txt Step 3 for how the Secret this references gets created).
 imagePullSecrets: []
-
 replicaCount: 2
 containerPort: 3001
-
 service:
   port: 3001
-
 resources:
   requests:
     cpu: 100m
@@ -26,13 +22,10 @@ resources:
   limits:
     cpu: 500m
     memory: 256Mi
-
 probes:
   path: /api/health
-
 env:
   PORT: "3001"
-
 # Secret must already exist in the cluster (created by hand, Terraform, or
 # External Secrets Operator syncing from AWS Secrets Manager) and contain
 # a key named DATABASE_URL. This chart does not create it.
