@@ -109,8 +109,15 @@ full kind workflow).
 - Frontend talks to the backend via a relative `/api` path; in production this is proxied by
   `frontend/nginx.conf` to the backend container/service — there is no hardcoded backend host
   baked into the frontend build.
-- Helm chart (`helm/calendar/`) currently deploys backend + frontend as one flat chart (this is
-  planned to become an umbrella chart with backend/frontend as subcharts — see `workplan.txt` Step 2).
+- Helm chart (`helm/calendar/`) is an umbrella chart: `charts/backend/` and `charts/frontend/` are
+  independent subcharts (own `Chart.yaml`/`values.yaml`/templates, not designed for standalone
+  install). Cross-subchart references (frontend's nginx config needs backend's Service name+port,
+  the parent's ingress/migration-job need both) use naming helpers defined once in the *parent's*
+  `_helpers.tpl` — see that file's own comment for why a subchart's own `.Chart.Name`-based helper
+  would silently resolve wrong when called across chart boundaries. The one genuinely
+  cross-subchart *value* (backend's service port, needed by frontend) goes through a `global:` key
+  in the parent `values.yaml`, deliberately duplicated with backend's own `values.yaml` rather than
+  making backend depend on a global for its own resources.
 - CI is split into two independent, path-filtered workflows —
   `.github/workflows/backend-ci.yml` and `.github/workflows/frontend-ci.yml` — each only triggers
   on changes to its own folder (or the shared root `package.json`/`package-lock.json`). Each runs

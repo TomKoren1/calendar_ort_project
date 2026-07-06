@@ -1,0 +1,21 @@
+# Default values for the frontend subchart. Not designed for standalone
+# install - only ever deployed via the parent calendar umbrella chart.
+
+image:
+  repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-frontend
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+containerPort: 80
+
+service:
+  port: 80
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 64Mi

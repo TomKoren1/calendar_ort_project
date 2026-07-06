@@ -28,13 +28,15 @@ frontend/            React (Vite) app
   nginx.conf           serves the built app, proxies /api/ to the backend container
   Dockerfile           multi-stage build -> nginx
 
-helm/calendar/       Helm chart for deploying to Kubernetes
+helm/calendar/       Umbrella Helm chart for deploying to Kubernetes
+  Chart.yaml           declares backend/frontend as local subchart dependencies
+  values.yaml          cross-cutting config (ingress, migration, global.backend.servicePort)
   templates/
-    backend-deployment.yaml / backend-service.yaml
-    frontend-deployment.yaml / frontend-service.yaml / frontend-configmap.yaml  (templates nginx.conf's backend hostname)
-    migration-job.yaml    pre-install/pre-upgrade hook: runs migrations once before app pods roll out
+    migration-job.yaml   pre-install/pre-upgrade hook: runs migrations once before app pods roll out
     ingress.yaml
-  values.yaml          image repos/tags, replica counts, resources, ingress config
+    _helpers.tpl          cross-chart-safe naming helpers (see file's own comment for why)
+  charts/backend/       independent subchart: Deployment, Service, own values.yaml (image/resources/etc)
+  charts/frontend/      independent subchart: Deployment, Service, ConfigMap (nginx.conf), own values.yaml
 
 local-dev/           local-only files for testing the Helm chart against a kind cluster
   kind-postgres.yaml   throwaway Postgres + Secret (the chart itself assumes an external managed DB, e.g. RDS)
@@ -118,7 +120,7 @@ kubectl apply -f local-dev/kind-postgres.yaml
 
 helm install calendar ./helm/calendar -f local-dev/values-kind.yaml
 
-kubectl port-forward svc/calendar-calendar-frontend 8080:80
+kubectl port-forward svc/calendar-frontend 8080:80
 ```
 
 Then open **http://localhost:8080**.

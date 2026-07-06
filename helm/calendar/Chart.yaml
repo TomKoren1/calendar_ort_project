@@ -2,5 +2,14 @@ apiVersion: v2
 name: calendar
 description: Calendar app (React frontend + Express backend), backed by an external Postgres (e.g. RDS)
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "1.0.0"
+
+# Purely local subcharts, already vendored under charts/ - no repository:
+# field, since there's nothing to fetch (no `helm dependency update` needed).
+# Helm still requires them declared here to include them at all.
+dependencies:
+  - name: backend
+    version: "0.1.0"
+  - name: frontend
+    version: "0.1.0"

@@ -129,7 +129,33 @@ STEP 2 — Umbrella Helm chart
 - Shared resources that don't belong to either service (ingress, migration-job,
   any cross-cutting config) stay at the umbrella/parent level.
 
-(Awaiting further detail/confirmation on this step before moving to implementation.)
+DONE (2026-07-06):
+  - helm/calendar/ is now the parent/umbrella chart; charts/backend/ and
+    charts/frontend/ are independent subcharts (own Chart.yaml/values.yaml/
+    templates), declared as local dependencies (no repository:) in the
+    parent's Chart.yaml, required by Helm v4 even for purely local subcharts.
+  - Accepted the resource-rename consequence: calendar-calendar-backend ->
+    calendar-backend, calendar-calendar-frontend -> calendar-frontend (and
+    same for the -nginx ConfigMap). README's port-forward command updated.
+  - Real Helm v4 gotcha hit and solved: a subchart's own .Chart.Name-based
+    naming helper resolves WRONG when called across chart boundaries (e.g.
+    frontend's configmap calling something meant for backend) because all
+    templates (parent + subcharts) share one template namespace but `.`
+    context is whatever the caller passes. Fixed by keeping the two
+    cross-referenced naming helpers (calendar.backend.fullname,
+    calendar.frontend.fullname) in the PARENT's _helpers.tpl using
+    .Release.Name + a literal string, never .Chart.Name. Each subchart still
+    has its own small _helpers.tpl for labels used only within itself.
+  - The one genuine cross-subchart value (backend's service port, needed by
+    frontend's nginx proxy_pass) goes through a global.backend.servicePort
+    key in the parent's values.yaml - deliberately duplicated with backend's
+    own values.yaml rather than making backend depend on a global for its
+    own resources.
+  - Verified with `helm lint` (0 failures) and `helm template` against both
+    the default values and local-dev/values-kind.yaml - correct names, correct
+    cross-subchart proxy_pass target, ingress correctly omitted when disabled,
+    image/replica overrides correctly cascade into both subcharts.
+  - README.md/CLAUDE.md updated to describe the umbrella structure.
 
 ============================================================
 STEP 3 — Argo CD / GitOps deployment

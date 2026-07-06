@@ -1,48 +1,20 @@
-# Default values for the calendar chart.
+# Default values for the calendar umbrella chart.
 # Override per-environment with -f values-staging.yaml / -f values-prod.yaml
+# Per-service defaults (image, resources, replicas, etc) live in
+# charts/backend/values.yaml and charts/frontend/values.yaml - override them
+# from here (or an environment values file) using the same "backend:"/
+# "frontend:" nesting shown in local-dev/values-kind.yaml.
 
-backend:
-  image:
-    repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-backend
-    tag: latest
-    pullPolicy: IfNotPresent
-  replicaCount: 2
-  containerPort: 3001
-  service:
-    port: 3001
-  resources:
-    requests:
-      cpu: 100m
-      memory: 128Mi
-    limits:
-      cpu: 500m
-      memory: 256Mi
-  probes:
-    path: /api/health
-  env:
-    PORT: "3001"
-  # Secret must already exist in the cluster (created by hand, Terraform, or
-  # External Secrets Operator syncing from AWS Secrets Manager) and contain
-  # a key named DATABASE_URL. This chart does not create it.
-  existingSecret: calendar-db-credentials
-  existingSecretKey: DATABASE_URL
-
-frontend:
-  image:
-    repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-frontend
-    tag: latest
-    pullPolicy: IfNotPresent
-  replicaCount: 2
-  containerPort: 80
-  service:
-    port: 80
-  resources:
-    requests:
-      cpu: 50m
-      memory: 32Mi
-    limits:
-      cpu: 200m
-      memory: 64Mi
+# Values every subchart can see, regardless of which one is currently
+# rendering (plain backend:/frontend: keys are only visible to that specific
+# subchart). Only used for the one genuine cross-subchart reference here:
+# frontend's nginx config needs to know backend's Service port. Deliberately
+# duplicated with charts/backend/values.yaml's own service.port rather than
+# making backend depend on a global for its own resources - keep both in
+# sync if backend's port ever changes.
+global:
+  backend:
+    servicePort: 3001
 
 # Runs node-pg-migrate (via the backend image) once per install/upgrade,
 # before backend pods roll out, so replicas never race each other applying

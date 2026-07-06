@@ -4,7 +4,7 @@ kind: Ingress
 metadata:
   name: {{ include "calendar.fullname" . }}
   labels:
-    {{- include "calendar.labels" . | nindent 4 }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
   annotations:
     {{- toYaml .Values.ingress.annotations | nindent 4 }}
 spec:

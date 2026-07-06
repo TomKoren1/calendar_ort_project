@@ -1,0 +1,34 @@
+# Default values for the backend subchart. Not designed for standalone
+# install - only ever deployed via the parent calendar umbrella chart, which
+# is what supplies existingSecret/ingress/etc context.
+
+image:
+  repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-backend
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+containerPort: 3001
+
+service:
+  port: 3001
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+probes:
+  path: /api/health
+
+env:
+  PORT: "3001"
+
+# Secret must already exist in the cluster (created by hand, Terraform, or
+# External Secrets Operator syncing from AWS Secrets Manager) and contain
+# a key named DATABASE_URL. This chart does not create it.
+existingSecret: calendar-db-credentials
+existingSecretKey: DATABASE_URL
