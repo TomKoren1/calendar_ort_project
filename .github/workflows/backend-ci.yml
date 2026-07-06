@@ -89,7 +89,7 @@ jobs:
         run: |
           yq -i '.image.tag = "${{ github.sha }}"' helm/calendar/charts/backend/values.yaml
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add helm/calendar/charts/backend/values.yaml
           git commit -m "chore(backend): bump image tag to ${{ github.sha }}"
           for i in 1 2 3; do

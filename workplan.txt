@@ -221,14 +221,30 @@ Sub-step order:
     workflows bump at the same time). permissions bumped contents: read ->
     write. Confirmed this commit's path (helm/calendar/charts/*/values.yaml)
     does NOT match either workflow's path filters, so no retrigger loop.
-  - NOT YET VERIFIED LIVE: needs an actual push to main to confirm the bump
-    commit really happens (yq's presence on GitHub's ubuntu-latest runner is
-    assumed, not confirmed from this environment).
-  - Manual step for the user once ready to test against kind: create the ECR
+3a VERIFIED LIVE (2026-07-06):
+  - yq IS preinstalled on GitHub's ubuntu-latest runners, confirmed - no extra
+    install step needed.
+  - Real bug hit along the way, not a code bug: the PR had not actually been
+    merged (branch had no path into main's history) even though it looked
+    merged - caught by checking `git merge-base --is-ancestor` directly rather
+    than trusting appearances.
+  - Real repo-config gotcha hit and fixed: GitHub repos have a
+    Settings -> Actions -> General -> "Workflow permissions" setting that caps
+    GITHUB_TOKEN regardless of a workflow's own `permissions: contents: write`
+    - it only narrows, never widens, that repo-level ceiling. Was set to
+    read-only; flipped to "Read and write permissions".
+  - After both fixes: both bump commits landed for real
+    (chore(backend)/chore(frontend): bump image tag to <sha>), and the exact
+    same SHA tag was confirmed to actually exist in the ECR repo via
+    `aws ecr describe-images` - Git and ECR agree on the same deployed
+    version, which is the entire point of this sub-step.
+  - Minor correctness fix applied: bot commit email corrected to
+    41898282+github-actions[bot]@users.noreply.github.com (the canonical id
+    GitHub needs to render the verified bot badge).
+  - Manual step still needed once ready to test against kind: create the ECR
     pull secret (command is in local-dev/values-kind-ecr.yaml's own comment).
 
-NEXT: verify 3a live (merge, watch Actions, confirm the bump commit lands),
-then 3b - install Argo CD + app-of-apps + ApplicationSet using
+NEXT: 3b - install Argo CD + app-of-apps + ApplicationSet using
 local-dev/values-kind-ecr.yaml.
 
 ============================================================
