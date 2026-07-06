@@ -1,0 +1,31 @@
+# Overrides for running the REAL GitOps loop against the local kind cluster:
+# images come from the actual ECR repos (Step 1c/1d), not a manually-built
+# `:local` tag - image.tag is deliberately left unset here so each subchart's
+# own values.yaml default (kept current by CI's tag-bump step, see
+# workplan.txt Step 3) is what actually gets deployed.
+#
+# kind has no AWS IAM identity of its own, so pulling these private ECR
+# images needs an imagePullSecrets Secret created by hand:
+#   aws ecr get-login-password --region us-east-1 | kubectl create secret docker-registry ecr-pull-secret \
+#     --docker-server=672299759593.dkr.ecr.us-east-1.amazonaws.com \
+#     --docker-username=AWS \
+#     --docker-password-stdin
+# That token expires after ~12h and needs recreating - a kind-only
+# limitation; Step 4's EKS uses IRSA instead (no static credential at all).
+backend:
+  image:
+    repository: 672299759593.dkr.ecr.us-east-1.amazonaws.com/calendar-backend
+  imagePullSecrets:
+    - name: ecr-pull-secret
+  replicaCount: 1
+
+frontend:
+  image:
+    repository: 672299759593.dkr.ecr.us-east-1.amazonaws.com/calendar-frontend
+  imagePullSecrets:
+    - name: ecr-pull-secret
+  replicaCount: 1
+
+# kind has no AWS ALB controller; Argo/kubectl port-forward is how you reach it.
+ingress:
+  enabled: false

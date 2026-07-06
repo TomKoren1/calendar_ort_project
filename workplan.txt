@@ -173,7 +173,63 @@ STEP 3 — Argo CD / GitOps deployment
   image tag), Argo CD detects the change and syncs the cluster — no direct
   `helm upgrade`/`kubectl apply` from CI.
 
-(Awaiting further detail/confirmation on this step before moving to implementation.)
+Decisions made (2026-07-06):
+  - Argo CD install: official kubectl quickstart manifest (not Helm) - simplest
+    first bootstrap, no self-management benefit yet on one local cluster.
+  - Repo structure: keep app code + Helm chart in this one repo. Argo's
+    Application only diffs the helm/calendar path specifically, so app-code
+    commits elsewhere are harmless no-ops for it - matches the bootcamp
+    material's own "small/solo project" guidance, not the "mixing code and
+    config" anti-pattern it warns larger orgs about.
+  - App-of-Apps is genuinely justified here (not just for show): a root
+    Application will manage two real children - the calendar app now, and
+    kube-prometheus-stack once Step 5 adds it. That's the actual two-app case
+    the pattern is for.
+  - ApplicationSet for the calendar app: List generator with ONE element today
+    (env: kind, values file: local-dev/values-kind.yaml), structured so adding
+    a second environment later is a one-line list addition - honest that this
+    is "shape it right for later," not "we need this at 1 app" (ApplicationSets
+    are for >20 similar apps per the bootcamp material; we have 1).
+  - Sync policy: full automation (automated + selfHeal + prune) for this local
+    learning cluster, unlike a real prod setup that would likely gate on
+    manual approval.
+  - Known, deliberate gap NOT solved in this step: Helm values still pin
+    `tag: latest` (a moving pointer), not a per-commit SHA that CI bumps in
+    Git - true "Git = exact deployed version" GitOps needs CI to write the
+    SHA into a tracked values file on every push. Real, separate follow-up
+    work, not silently bundled into Step 3.
+
+Sub-step order:
+  3a. Install Argo CD into the kind cluster (official manifest), verify
+      access (UI or CLI).
+  3b. Create argocd/ dir: root app-of-apps Application (applied once by hand)
+      + one child ApplicationSet for the calendar app. Verify Argo actually
+      manages what manual `helm install` was doing - replaces it, not just
+      duplicates it.
+
+3a CODED, awaiting live verification (2026-07-06):
+  - Added imagePullSecrets support to both subcharts (deployment.yaml + a
+    default `imagePullSecrets: []` in each values.yaml) - didn't exist before.
+  - New local-dev/values-kind-ecr.yaml: points at the real ECR repos, adds the
+    imagePullSecrets reference, deliberately leaves image.tag unset so each
+    chart's own (CI-bumped) default flows through. local-dev/values-kind.yaml
+    (pure local, tag: local) is untouched/unaffected - two separate modes.
+  - Both backend-ci.yml/frontend-ci.yml build-and-push jobs: added a step
+    after the ECR push that runs `yq -i '.image.tag = "<sha>"'` on that
+    service's own chart values.yaml, commits as github-actions[bot], and
+    pushes to main (with a pull --rebase retry loop for the rare case both
+    workflows bump at the same time). permissions bumped contents: read ->
+    write. Confirmed this commit's path (helm/calendar/charts/*/values.yaml)
+    does NOT match either workflow's path filters, so no retrigger loop.
+  - NOT YET VERIFIED LIVE: needs an actual push to main to confirm the bump
+    commit really happens (yq's presence on GitHub's ubuntu-latest runner is
+    assumed, not confirmed from this environment).
+  - Manual step for the user once ready to test against kind: create the ECR
+    pull secret (command is in local-dev/values-kind-ecr.yaml's own comment).
+
+NEXT: verify 3a live (merge, watch Actions, confirm the bump commit lands),
+then 3b - install Argo CD + app-of-apps + ApplicationSet using
+local-dev/values-kind-ecr.yaml.
 
 ============================================================
 STEP 4 — Terraform: VPC, EKS, cluster add-ons, RDS
