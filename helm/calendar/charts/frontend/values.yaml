@@ -6,6 +6,11 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Empty by default (public/no-registry-auth images). Set when pulling from a
+# private registry the node has no other credentials for - see backend's
+# values.yaml for the full explanation.
+imagePullSecrets: []
+
 replicaCount: 2
 containerPort: 80
 

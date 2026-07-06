@@ -7,6 +7,12 @@ image:
   tag: latest
   pullPolicy: IfNotPresent
 
+# Empty by default (public/no-registry-auth images). Set when pulling from a
+# private registry the node has no other credentials for - e.g. ECR from a
+# kind cluster with no IAM identity of its own (see local-dev/README or
+# workplan.txt Step 3 for how the Secret this references gets created).
+imagePullSecrets: []
+
 replicaCount: 2
 containerPort: 3001
 

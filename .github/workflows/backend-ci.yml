@@ -60,7 +60,7 @@ jobs:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       id-token: write
     steps:
       - uses: actions/checkout@v4
@@ -84,3 +84,15 @@ jobs:
           tags: |
             ${{ steps.ecr-login.outputs.registry }}/calendar-backend:${{ github.sha }}
             ${{ steps.ecr-login.outputs.registry }}/calendar-backend:latest
+
+      - name: Bump backend image tag in Git (GitOps loop - Argo CD watches this file)
+        run: |
+          yq -i '.image.tag = "${{ github.sha }}"' helm/calendar/charts/backend/values.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add helm/calendar/charts/backend/values.yaml
+          git commit -m "chore(backend): bump image tag to ${{ github.sha }}"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && break
+            sleep 3
+          done
