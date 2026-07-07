@@ -125,6 +125,39 @@ kubectl port-forward svc/calendar-frontend 8080:80
 
 Then open **http://localhost:8080**.
 
+## GitOps deployment (Argo CD)
+
+The commands above still work for a one-off manual install, but the kind cluster is actually kept
+in sync by **Argo CD** using an app-of-apps pattern — Git, not a person running `helm upgrade`, is
+the source of truth for what's deployed.
+
+```
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml --server-side --force-conflicts
+```
+
+(`--server-side` matters: plain `kubectl apply` fails on the `applicationsets.argoproj.io` CRD,
+which is too large for the client-side `last-applied-configuration` annotation.)
+
+Bootstrap (applied once, by hand):
+```
+kubectl apply -f argocd/bootstrap/root-application.yaml
+```
+
+That one `Application` points at `argocd/applications/`, which currently holds
+`calendar-appset.yaml` — an `ApplicationSet` (List generator, one `kind` environment today,
+structured so a second real environment is a one-line addition later) that deploys `helm/calendar`
+with `local-dev/values-kind-ecr.yaml`. Everything after that first `kubectl apply` is automatic:
+push to `main` → CI builds and pushes the image to ECR → CI bumps the image tag in
+`helm/calendar/charts/*/values.yaml` and pushes that to `main` → Argo detects the Git change and
+syncs the cluster, with `selfHeal` reverting any manual drift and `prune` removing anything deleted
+from Git.
+
+Since kind has no AWS IAM identity of its own, pulling the private ECR images needs a manually
+created pull secret (see `local-dev/values-kind-ecr.yaml`'s own comment for the exact command) —
+this is a kind-only limitation; a real EKS cluster would use IRSA instead of a static, expiring
+credential.
+
 ## CI/CD
 
 Two independent workflows, each triggered only by changes relevant to it (via `paths:` filters —
@@ -141,6 +174,15 @@ a PR that only touches `frontend/` never runs backend CI, and vice versa). Both 
 
 Both images are tagged with the git commit SHA and `latest` — use the SHA tag for anything real,
 `latest` is a convenience pointer only.
+
+### The image tag is also written back to Git (real GitOps loop)
+
+After pushing to ECR, each workflow also bumps `image.tag` in its own chart's `values.yaml`
+(`helm/calendar/charts/backend/values.yaml` or `.../frontend/values.yaml`) to the commit SHA and
+pushes that commit to `main` as `github-actions[bot]`. Without this, Argo CD (see GitOps section
+above) would be watching a values file pinned to `tag: latest` — a moving pointer with nothing for
+Argo to ever detect a change on. That bump commit's path doesn't match either workflow's `paths:`
+filter, so it can't retrigger a CI loop.
 
 ### Authentication: GitHub OIDC, no stored AWS keys
 

@@ -265,10 +265,46 @@ Sub-step order:
   - Verified argocd-server actually responds (port-forward + /healthz -> 200)
     before moving on.
 
-NEXT: create argocd/ dir - root app-of-apps Application (applied once by
-hand) + one child ApplicationSet for the calendar app, targeting
-local-dev/values-kind-ecr.yaml. Then verify Argo actually manages the
-deployment (replacing the manual `helm install` from Step 2's test).
+3b DONE (2026-07-07):
+  - argocd/bootstrap/root-application.yaml (applied once by hand) +
+    argocd/applications/calendar-appset.yaml (List generator, one "kind"
+    element today). Both validated against the live cluster's CRD schema via
+    `kubectl apply --dry-run=server` before ever touching anything for real.
+  - Uninstalled the manual Step 2 test release first (`helm uninstall
+    calendar`) so Argo's own Helm rendering wouldn't fight over resource
+    ownership with a real `helm install` release.
+  - Caught and fixed live: the migration Job (parent-level, not a subchart)
+    never got the imagePullSecrets treatment added to backend/frontend -
+    ImagePullBackOff with "no basic auth credentials". Same one-line fix
+    applied to the one place it was missed - see [[project_helm_umbrella_chart_conventions]]-
+    style lesson: cross-cutting parent templates need the same review as
+    subchart templates when adding a cross-cutting capability.
+  - Real, substantial debugging saga (saved to memory - see
+    feedback_argocd_stuck_hook_operation.md): once the migration Job got
+    stuck in ImagePullBackOff (which never reaches a terminal failure state
+    on its own), Argo's retry loop kept reusing that SAME stuck operation's
+    ORIGINAL stale render forever - merging the real fix to main did nothing
+    for it. Neither a hard-refresh annotation, nor patching .operation
+    directly, nor restarting repo-server, nor restarting the
+    application-controller fixed it. Only fully deleting the Application
+    (with its resources-finalizer force-cleared) and letting the
+    ApplicationSet regenerate a truly fresh one worked - confirmed via a
+    genuinely new creationTimestamp/uid, not just appearances.
+  - Also verified (and ruled out as the cause here, but worth knowing): Argo's
+    bundled Helm binary version can genuinely differ from a local install
+    (this cluster: Argo has Helm v3.19.4 internally vs v4.2.2 installed
+    locally) - checked directly via `kubectl -n argocd exec
+    deploy/argocd-repo-server -- helm version` rather than assumed.
+  - Final verified state: calendar-root and calendar-kind both Synced/Healthy,
+    both pods pulling the real CI-bumped SHA tag from ECR with the pull
+    secret, full app verified end-to-end (frontend -> nginx -> backend ->
+    Postgres) through a real port-forward, not just `kubectl get pods`.
+
+STEP 3 (Argo CD / GitOps) COMPLETE: 3a (CI writes the real image tag back to
+Git) -> 3b (Argo CD installed, app-of-apps + ApplicationSet actually manage
+the deployment, replacing manual helm install/upgrade entirely). The known
+gap from 3a (kind's ECR pull secret is a manually-refreshed, ~12h-expiring
+static credential) remains open until Step 4's EKS/IRSA.
 
 ============================================================
 STEP 4 — Terraform: VPC, EKS, cluster add-ons, RDS

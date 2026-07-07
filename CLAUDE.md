@@ -124,4 +124,18 @@ full kind workflow).
   its own tests/lint+build, then on push to `main` only, authenticates to AWS via GitHub OIDC
   (`aws-actions/configure-aws-credentials` + `amazon-ecr-login`, no stored AWS keys) and pushes
   just its own image to Amazon ECR (SHA + `latest` tags — use SHA for anything real). The ECR
-  repos/OIDC provider/IAM role are provisioned by Terraform in `infra/bootstrap/`.
+  repos/OIDC provider/IAM role are provisioned by Terraform in `infra/bootstrap/`. Each job then
+  bumps its chart's `image.tag` to the SHA and pushes that to `main` — this is what Argo CD (below)
+  actually watches; without it, Git would stay pinned to `tag: latest` with nothing for Argo to
+  detect on a new deploy.
+- Deployment to the kind cluster is GitOps-managed via **Argo CD**, not manual `helm install`:
+  `argocd/bootstrap/root-application.yaml` is the one manifest ever applied by hand (app-of-apps
+  root); it points at `argocd/applications/`, which holds `calendar-appset.yaml` — an
+  `ApplicationSet` (List generator) that deploys `helm/calendar` with
+  `local-dev/values-kind-ecr.yaml`. `syncPolicy` is fully automated with `selfHeal` + `prune`. A
+  real, non-obvious operational trap hit here: if a sync gets stuck on a hook resource that never
+  reaches a terminal state (e.g. a Job stuck in `ImagePullBackOff`), Argo's retries reuse that
+  operation's *original* stale render forever — merging a real fix to `main` does nothing for it,
+  and neither does a hard-refresh annotation or restarting `repo-server`/`application-controller`.
+  Only deleting and letting the `Application` regenerate fresh actually clears it (verify via a
+  genuinely new `.metadata.creationTimestamp`, not just apparent success).
