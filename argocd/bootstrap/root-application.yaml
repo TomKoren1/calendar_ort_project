@@ -1,0 +1,32 @@
+# The one Application applied by hand (kubectl apply -f this file), once.
+# Everything else - the calendar app's ApplicationSet now, kube-prometheus-stack
+# later (Step 5) - lives as a plain manifest under argocd/applications/ and
+# gets created/updated/deleted by THIS Application syncing, not by hand.
+#
+# Must live in the argocd namespace: Application/ApplicationSet are custom
+# resources Argo's controllers watch specifically there by default.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: calendar-root
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/TomKoren1/calendar_ort_project.git
+    targetRevision: main
+    # A plain directory of Application/ApplicationSet YAML - not a Helm
+    # chart - Argo applies whatever manifests it finds here directly.
+    path: argocd/applications
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+
+  syncPolicy:
+    automated:
+      selfHeal: true
+      prune: true
+    syncOptions:
+      - CreateNamespace=true

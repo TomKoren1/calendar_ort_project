@@ -1,0 +1,44 @@
+# One environment today (kind/local) - the List generator's shape is what
+# makes adding a real "staging"/"prod" entry later a one-line addition
+# instead of copy-pasting a whole new Application. Honest that this is
+# "shaped right for later," not "we need this at 1 environment" - see
+# workplan.txt Step 3 for the ApplicationSet-vs-App-of-Apps trade-off notes.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: calendar
+  namespace: argocd
+spec:
+  generators:
+    - list:
+        elements:
+          - env: kind
+            valuesFile: local-dev/values-kind-ecr.yaml
+            namespace: default
+
+  template:
+    metadata:
+      name: 'calendar-{{env}}'
+    spec:
+      project: default
+
+      source:
+        repoURL: https://github.com/TomKoren1/calendar_ort_project.git
+        targetRevision: main
+        path: helm/calendar
+        helm:
+          valueFiles:
+            # Resolved relative to source.path above, still within the same
+            # repo checkout - not an absolute/external path.
+            - '../../{{valuesFile}}'
+
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{namespace}}'
+
+      syncPolicy:
+        automated:
+          selfHeal: true
+          prune: true
+        syncOptions:
+          - CreateNamespace=true

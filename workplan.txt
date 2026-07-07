@@ -244,8 +244,31 @@ Sub-step order:
   - Manual step still needed once ready to test against kind: create the ECR
     pull secret (command is in local-dev/values-kind-ecr.yaml's own comment).
 
-NEXT: 3b - install Argo CD + app-of-apps + ApplicationSet using
-local-dev/values-kind-ecr.yaml.
+3b IN PROGRESS (2026-07-06) - Argo CD installed and verified:
+  - kubectl create ns argocd + official quickstart install.yaml.
+  - Real issue hit: plain `kubectl apply` failed on the applicationsets.argoproj.io
+    CRD - "metadata.annotations: Too long: may not be more than 262144 bytes".
+    Client-side apply stores the whole manifest in a last-applied-configuration
+    annotation, and this CRD is big enough to exceed etcd's annotation limit.
+    Fixed with `--server-side --force-conflicts` (doesn't need that
+    annotation at all) - re-applying the same manifest that way succeeded
+    with 0 errors, all 3 CRDs (applications/applicationsets/appprojects)
+    present, all 7 components Running.
+  - Real mistake made and caught: tried to "rotate" the initial admin password
+    by writing a random string directly into argocd-secret's admin.password
+    field - that field must be a bcrypt HASH, not plaintext, so this would
+    have broken login rather than rotating it. Fixed by clearing
+    admin.password/admin.passwordMtime back to empty and restarting
+    argocd-server, which re-triggers Argo's own bootstrap logic (the same
+    mechanism that generates argocd-initial-admin-secret the first time) -
+    a clean, correct do-over instead of hand-rolling a bcrypt hash.
+  - Verified argocd-server actually responds (port-forward + /healthz -> 200)
+    before moving on.
+
+NEXT: create argocd/ dir - root app-of-apps Application (applied once by
+hand) + one child ApplicationSet for the calendar app, targeting
+local-dev/values-kind-ecr.yaml. Then verify Argo actually manages the
+deployment (replacing the manual `helm install` from Step 2's test).
 
 ============================================================
 STEP 4 — Terraform: VPC, EKS, cluster add-ons, RDS
