@@ -16,6 +16,10 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      {{- with .Values.backend.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: migrate
           # Same image as the backend Deployment — it already carries
