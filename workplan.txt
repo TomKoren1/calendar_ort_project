@@ -334,7 +334,38 @@ STEP 4 — Terraform: VPC, EKS, cluster add-ons, RDS
   privilege IAM (ties into Step 1's GitHub OIDC role and the ALB
   controller/CSI/autoscaler each needing their own scoped IAM roles via IRSA).
 
-(Awaiting further detail/confirmation on this step before moving to implementation.)
+Decisions made (2026-07-08):
+  - Cost is the dominant constraint here, unlike every step before it: an
+    always-on EKS+RDS+NAT setup runs ~$150-300+/month, vs Step 1c's
+    essentially-free IAM/ECR bootstrap. User wants to apply-and-destroy every
+    working session to minimize spend, not leave this running.
+  - That workflow requires state to survive the destroy/apply cycle, so this
+    splits into infra/state-backend/ (tiny, permanent, applied once, never
+    destroyed - S3 bucket + DynamoDB lock table) and infra/main/ (the actual
+    expensive VPC/EKS/Karpenter/RDS stack, meant to be destroyed regularly).
+  - Karpenter over Cluster Autoscaler - bootcamp material's own framing as
+    the modern AWS-native approach.
+  - Cost-optimized (not textbook-HA) sizing, explicitly agreed given the
+    apply/destroy workflow: single NAT gateway (not per-AZ), single-AZ RDS
+    (not Multi-AZ), small/spot Karpenter instances.
+  - RDS data is ephemeral by design (won't survive a destroy) - acceptable,
+    matches how kind's local Postgres is already treated.
+
+4a DONE (2026-07-08) - infra/state-backend/:
+  - S3 bucket calendar-terraform-state-672299759593 (versioned, AES256
+    encrypted, fully public-access-blocked, TLS-only bucket policy) +
+    DynamoDB table calendar-terraform-locks (PAY_PER_REQUEST, no idle cost).
+  - Both resources carry `lifecycle { prevent_destroy = true }` - a real
+    guard against accidentally destroying the ONE thing in this whole
+    project that must never be destroyed, given the apply/destroy-every-
+    session workflow everything else in this step is about to use.
+  - Local state for this module itself (same bootstrap chicken-and-egg
+    reasoning as infra/bootstrap/ - can't depend on a remote backend it's
+    the one creating).
+  - Plan reviewed (6 to add, 0 to change, 0 to destroy) and applied cleanly.
+
+NEXT: infra/main/ - VPC, EKS, Karpenter, ALB controller, CNI/CSI add-ons,
+RDS, using infra/state-backend/'s bucket/table as a real remote backend.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
