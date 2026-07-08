@@ -43,19 +43,6 @@ module "eks" {
     }
   }
 
-  # Karpenter's own controller pods need somewhere to run before it can
-  # provision anything itself, so they get this small Fargate profile
-  # instead of a permanent EC2 node group.
-  fargate_profiles = {
-    karpenter = {
-      name = "karpenter"
-      selectors = [
-        { namespace = "karpenter" }
-      ]
-      subnet_ids = module.vpc.private_subnets
-    }
-  }
-
   # Real correction made after the first apply attempt: originally planned
   # zero EKS managed node groups at all (Karpenter provisions everything).
   # That doesn't work for core cluster system pods specifically -
@@ -66,6 +53,15 @@ module "eks" {
   # standard fix - Karpenter still handles all actual application workload
   # scaling, this just hosts the handful of pods every cluster needs
   # regardless of Karpenter's existence.
+  #
+  # Second correction, same theme: originally gave Karpenter's own controller
+  # a small Fargate profile to run on. That controller pod then crash-looped
+  # on Fargate specifically - DNS lookups for sts.us-east-1.amazonaws.com
+  # (needed for its IRSA credentials) consistently timed out, a real Fargate
+  # networking issue, not a config mistake (security groups/routing all
+  # checked out fine). Removed the Fargate profile entirely; Karpenter's
+  # controller now schedules onto this same system node group instead, which
+  # already has proven-working networking (it successfully pulls from ECR).
   eks_managed_node_groups = {
     system = {
       name           = "${var.cluster_name}-system"

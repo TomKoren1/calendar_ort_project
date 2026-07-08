@@ -412,8 +412,54 @@ Decisions made (2026-07-08):
     name, not the module's actual attribute module.vpc.private_subnets) -
     caught immediately by `terraform validate`.
 
-NEXT: Karpenter (NodePool + EC2NodeClass, using the cluster's OIDC provider
-for its IRSA role), then ALB controller, RDS.
+4d DONE (2026-07-08) - Karpenter, real four-part debugging saga:
+  - Added helm + kubectl (alekc/kubectl) providers, both authenticating
+    against this same-apply-created cluster via data.aws_eks_cluster_auth -
+    no static credential, same pattern as the AWS-side IRSA mechanisms
+    already used throughout this project.
+  - module.karpenter (terraform-aws-modules/eks/aws//modules/karpenter) for
+    IRSA controller role + node role; ONE simplified NodePool
+    (general-purpose: spot-first, small t-family instances only) instead of
+    the bootcamp reference stack's four specialized pools - this app has no
+    exotic compute needs and system pods already have their own node group.
+  - Issue 1: EC2NodeClass rejected with "amiSelectorTerms: Required value" -
+    Karpenter's v1 API requires it explicitly (v1beta1 let amiFamily alone
+    implicitly resolve an AMI). Fixed: amiSelectorTerms = [{ alias =
+    "al2023@latest" }].
+  - Issue 2: Karpenter's controller pod (on a Fargate profile, matching the
+    reference stack) crash-looped - DNS lookups for
+    sts.us-east-1.amazonaws.com consistently timed out, a real Fargate
+    networking problem (security groups checked out fine, ruled out as the
+    cause). Fixed by removing the Fargate profile entirely and letting the
+    controller schedule onto the existing "system" EKS managed node group
+    instead, which already has proven-working networking. Learned along the
+    way: an EKS Fargate profile *claims* every pod in a matching namespace
+    for Fargate scheduling - no opt-out while the profile exists, so it had
+    to be removed, not just supplemented.
+  - Issue 3: once scheduled on a real node, the controller panicked instead -
+    "karpenter version is not compatible with K8s version 1.36". The pinned
+    chart version 1.1.1 (matching the bootcamp reference stack) predates
+    this cluster's K8s version. Fixed by checking the actual latest
+    available chart directly (`helm show chart
+    oci://public.ecr.aws/karpenter/karpenter`) and pinning to 1.13.0 instead -
+    also learned omitting `version` on an existing helm_release does NOT
+    force an upgrade to latest, it just leaves the currently-installed
+    version alone.
+  - Issue 4: with 1.13.0 running, real ERROR-level reconciler logs -
+    "no subnets found" and an explicit iam:ListInstanceProfiles AccessDenied.
+    The module's auto-generated controller IAM policy was incomplete for
+    this Karpenter version. Fixed by adding the standard extra controller
+    policy (EC2 describe actions, SSM/pricing reads, instance-profile
+    management, PassRole, eks:DescribeCluster) the bootcamp reference stack
+    also attaches alongside the module's base policy - kept broad rather
+    than resource-tag-scoped, a deliberate least-privilege trade-off for a
+    learning project where "working correctly" mattered more here.
+  - Final verified state: karpenter pod 1/1 Running, 0 restarts;
+    EC2NodeClass and NodePool both status Ready=True (checked via
+    `kubectl get ec2nodeclass/nodepool -o jsonpath='{.status.conditions}'`,
+    not just "pod is running").
+
+NEXT: ALB controller, RDS.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
