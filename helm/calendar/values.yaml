@@ -22,13 +22,17 @@ global:
 migration:
   enabled: true
 
+# className: nginx (not alb) - see workplan.txt Step 4e for why: source IP
+# preservation, richer L7 feature set, and no AWS-specific Ingress
+# annotations locking this chart to EKS. host is deliberately empty (matches
+# any Host header) since this project has no owned domain - reached directly
+# via the NLB's own AWS-generated hostname instead of a custom domain. No TLS
+# for the same reason (no domain to issue a real cert for).
 ingress:
   enabled: true
-  className: alb
-  host: calendar.example.com
-  annotations:
-    alb.ingress.kubernetes.io/scheme: internet-facing
-    alb.ingress.kubernetes.io/target-type: ip
+  className: nginx
+  host: ""
+  annotations: {}
   tls:
-    enabled: true
+    enabled: false
     secretName: calendar-tls

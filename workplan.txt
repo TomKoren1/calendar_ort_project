@@ -459,7 +459,71 @@ Decisions made (2026-07-08):
     `kubectl get ec2nodeclass/nodepool -o jsonpath='{.status.conditions}'`,
     not just "pod is running").
 
-NEXT: ALB controller, RDS.
+4e IN PROGRESS (blocked on AWS account verification, 2026-07-08) - AWS Load
+   Balancer Controller + ingress-nginx (NLB, not ALB):
+  - Switched the ingress design from a plain ALB Ingress to NLB (Layer 4) +
+    ingress-nginx (in-cluster Layer 7) - decided after discussing the real
+    trade-off: NLB preserves real client source IPs (ALB doesn't, by
+    default), ingress-nginx has a much richer feature set than raw ALB
+    Ingress annotations, and this keeps helm/calendar/templates/ingress.yaml
+    portable (plain ingressClassName: nginx, no AWS-specific annotations
+    baked into the app chart itself) vs. locking it to EKS. The AWS Load
+    Balancer Controller is still required even for this NLB path - it's what
+    actually understands the aws-load-balancer-* Service annotations for
+    IP-target-mode NLBs (the legacy in-tree cloud provider can only do
+    "instance" target mode, which is fragile against Karpenter dynamically
+    creating/destroying nodes).
+  - helm/calendar/templates/ingress.yaml reworked: host and annotations both
+    now optional (only rendered if set) since this project has no owned
+    domain - reached via the NLB's own AWS-generated hostname, not a real
+    domain, so no TLS either. helm/calendar/values.yaml ingress.className
+    changed from alb to nginx to match.
+  - Copied the "official" AWS Load Balancer Controller IAM policy from the
+    bootcamp reference material into infra/main/ingress-nginx.tf as a
+    starting point - it needed two real, live-debugged corrections, both
+    now fixed (same "reference material is version-drifted" pattern hit
+    repeatedly in 4c/4d):
+    - Issue 1: AccessDenied on elasticloadbalancing:AddTags immediately
+      after the controller created a target group. The copied statement had
+      a strict conditional (only allows AddTags once a resource is ALREADY
+      tagged as cluster-owned) that doesn't hold at the moment of resource
+      creation with this controller version (3.4.1). Fixed by simplifying
+      to an unconditional Allow on the specific target-group/load-balancer
+      ARNs - a deliberate least-privilege trade-off, not a full revert to
+      wildcard-everything.
+    - Issue 2: separately, ec2:DeleteSecurityGroup was missing from the
+      policy ENTIRELY (not just over-conditioned) - only surfaced once the
+      controller tried to clean up the security group it had created, during
+      an uninstall/replace. This left a real orphaned Kubernetes Service
+      object stuck with a `service.k8s.aws/resources` finalizer that could
+      only be cleared once the permission existed AND the controller pod was
+      manually restarted (`kubectl delete pod ...`) to force an immediate
+      reconcile instead of waiting out its retry backoff - the fix alone,
+      without the restart, would not have unstuck the already-orphaned
+      Service on its own.
+  - After both real bugs were fixed, hit a genuinely different, unrelated
+    error: `OperationNotPermitted: This AWS account currently does not
+    support creating load balancers. ... contact AWS Support` on
+    CreateLoadBalancer - confirmed via `aws elbv2 describe-load-balancers`
+    returning zero existing LBs (ruled out a quota-from-existing-resources
+    explanation). Root cause identified: this is a brand-new AWS account,
+    confirmed via the Cost Management console's first-time "check back in
+    24 hours" message - AWS gates ELB/NLB/ALB creation behind an automated
+    new-account verification window (commonly 24-48h) that isn't visible or
+    fixable via the API/Terraform/IAM at all; a payment method was already
+    on file, and no Budget Action/SCP was involved (ruled both out - the
+    error text itself is ELB-service-specific, not an IAM/SCP-style
+    AccessDenied). Nothing left to fix in code - infra/main/ingress-nginx.tf
+    is believed correct and ready to re-apply once the account restriction
+    clears.
+  - Session ended with `terraform destroy` of the whole infra/main/ stack
+    (cost control, as agreed for every session) rather than leaving it
+    running idle while blocked on an external account-verification wait.
+
+NEXT: re-apply 4e once the AWS account's new-account ELB restriction clears
+(verify via a plain `terraform apply` re-run - the IAM/Helm config itself
+needs no further changes), verify NLB gets a real hostname + EXTERNAL-IP,
+then RDS.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
