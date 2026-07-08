@@ -18,6 +18,19 @@ module "vpc" {
   private_subnets = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 8, k + 10)]
   public_subnets  = [for k, v in var.azs : cidrsubnet(var.vpc_cidr, 8, k)]
 
+  # Explicit per-resource names - without these, several resources default to
+  # sharing the VPC's own "Name" tag (e.g. the VPC and its Internet Gateway
+  # both showing "calendar-eks-vpc"), which is hard to tell apart in the AWS
+  # console/CLI output.
+  public_subnet_names         = [for az in var.azs : "${var.cluster_name}-public-${az}"]
+  private_subnet_names        = [for az in var.azs : "${var.cluster_name}-private-${az}"]
+  igw_tags                    = { Name = "${var.cluster_name}-igw" }
+  nat_gateway_tags            = { Name = "${var.cluster_name}-nat" }
+  nat_eip_tags                = { Name = "${var.cluster_name}-nat-eip" }
+  public_route_table_tags     = { Name = "${var.cluster_name}-public-rt" }
+  private_route_table_tags    = { Name = "${var.cluster_name}-private-rt" }
+  default_security_group_name = "${var.cluster_name}-default-sg"
+
   enable_nat_gateway = true
   # Cost-optimized choice for this apply-and-destroy-per-session stack: one
   # NAT gateway shared across AZs, not one per AZ. A real always-on prod
