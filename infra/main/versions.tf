@@ -14,6 +14,14 @@ terraform {
       source  = "alekc/kubectl" # gavinbunney/kubectl is unmaintained
       version = "~> 2.0"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = "~> 3.6"
+    }
+    kubernetes = {
+      source  = "hashicorp/kubernetes"
+      version = "~> 2.30"
+    }
   }
 
   # Real remote state, unlike infra/bootstrap/ and infra/state-backend/ (both

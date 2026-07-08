@@ -32,3 +32,12 @@ provider "kubectl" {
   token                  = data.aws_eks_cluster_auth.this.token
   load_config_file       = false
 }
+
+# Used only to write the RDS credentials into a Kubernetes Secret the app
+# reads directly (see rds.tf) - same same-apply-cluster auth pattern as
+# helm/kubectl above, no static credential.
+provider "kubernetes" {
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  token                  = data.aws_eks_cluster_auth.this.token
+}

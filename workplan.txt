@@ -520,10 +520,84 @@ Decisions made (2026-07-08):
     (cost control, as agreed for every session) rather than leaving it
     running idle while blocked on an external account-verification wait.
 
-NEXT: re-apply 4e once the AWS account's new-account ELB restriction clears
-(verify via a plain `terraform apply` re-run - the IAM/Helm config itself
-needs no further changes), verify NLB gets a real hostname + EXTERNAL-IP,
-then RDS.
+4f IN PROGRESS (code written + validated, not yet applied, 2026-07-08) -
+   RDS Postgres:
+  - infra/main/rds.tf: terraform-aws-modules/rds/aws, single-AZ db.t4g.micro
+    (smallest current-gen/Graviton burstable class), gp3/20GB,
+    storage_encrypted = true, publicly_accessible = false. Security group
+    allows Postgres (5432) only from module.eks.node_security_group_id -
+    confirmed this is the SAME shared SG used by both the fixed "system"
+    node group AND Karpenter-launched app nodes (Karpenter's EC2NodeClass
+    selects security groups by the karpenter.sh/discovery tag, which was
+    applied onto this exact SG back in eks.tf), so one ingress rule covers
+    both without a second SG.
+  - Ephemeral by design, matching the rest of this stack: backup_retention_
+    period = 0, skip_final_snapshot = true, deletion_protection = false -
+    RDS data does not survive a destroy/recreate cycle (accepted trade-off).
+  - Credentials decision (discussed at length before writing any code): a
+    random_password is written DIRECTLY into the Kubernetes Secret the
+    backend chart already expects (calendar-db-credentials /
+    DATABASE_URL - see helm/calendar/charts/backend/values.yaml), explicitly
+    WITHOUT AWS Secrets Manager. Reasoning: Secrets Manager's real value
+    (rotation reaching the running app, multi-consumer sharing, audit
+    trail) needs something to actually sync it into the cluster (External
+    Secrets Operator), which doesn't exist in this project yet - standing
+    up Secrets Manager alone today would just be Terraform writing the
+    password there and immediately reading it back out to populate this
+    same Kubernetes Secret, no operational benefit, plus ongoing cost, for
+    a stack destroyed every session. Discussed two concrete future features
+    (a calendar-sync proxy for Google/Apple/Microsoft, and an AI scheduling
+    assistant) - concluded the AI integration's future API key IS a good
+    Secrets Manager fit (single static app secret, same shape as this DB
+    password), but the calendar proxy's OAuth tokens are NOT (those are
+    per-user application data belonging in the database itself, not
+    infra-secrets - Secrets Manager cost scales per-secret, wrong shape for
+    per-user tokens).
+    FLAGGED FUTURE STEP: add AWS Secrets Manager + External Secrets
+    Operator once the AI-integration work introduces its first real static
+    app secret - migrate this RDS password into it at the same time, since
+    by then it's a small mechanical change, not a rearchitecture.
+  - Added `random` and `kubernetes` providers (versions.tf/provider.tf) -
+    kubernetes provider uses the same same-apply-cluster auth pattern as
+    helm/kubectl (data.aws_eks_cluster_auth token, no static credential).
+  - Real module-version issue hit and fixed before ever applying: the
+    bootcamp reference pins terraform-aws-modules/rds/aws ~> 6.0; checked
+    actual latest via the registry API directly (7.2.0), but 7.x requires
+    AWS provider >= 6.28 - a major-version jump from this project's
+    existing `~> 5.0` pin (shared by vpc/eks/karpenter) not worth forcing
+    just for RDS. Settled on ~> 6.0 (resolves 6.13.1), which only needs AWS
+    provider >= 5.36, already satisfied.
+  - Second real issue, caught in a targeted plan before applying: even in
+    v6.13.1, the module defaults `manage_master_user_password = true` (RDS
+    natively managing the password in ITS OWN Secrets Manager secret) -
+    this SILENTLY IGNORES the plain `password` argument entirely unless
+    manage_master_user_password is explicitly set to false. First targeted
+    plan showed `manage_master_user_password = true` and no `password` in
+    the diff at all despite it being set in the config - caught by
+    inspecting the plan output, not by an error. Fixed by explicitly adding
+    manage_master_user_password = false.
+  - Real, structural issue hit trying to `terraform plan` the whole stack
+    from the fully-destroyed state left at the end of 4e: a plain
+    untargeted plan fails outright (`invalid provider configuration` on the
+    kubectl provider) because provider.tf's helm/kubectl/kubernetes blocks
+    all depend on module.eks's outputs, which cannot be "known after apply"
+    for a provider block the way a normal resource argument can - this only
+    ever worked before because each piece (VPC, EKS, Karpenter, ALB
+    controller, and now RDS) was applied as its own separate `terraform
+    apply`, so module.eks was always already concrete in state by the time
+    a helm/kubectl/kubernetes-using piece was added. Conclusion: a full
+    re-apply from fully-empty state needs to be PHASED (VPC+EKS first via
+    -target, then everything else in a second apply), not one single
+    `terraform apply` - saved as its own memory entry since this will
+    matter every session from now on.
+
+NEXT: apply infra/main/ in two phases from the current fully-empty state -
+first `terraform apply -target module.vpc -target module.eks` (or re-apply
+4e's blocked-on-AWS-verification NLB piece may now succeed too, worth
+re-checking), then a second untargeted `terraform apply` for
+Karpenter/ALB-controller/ingress-nginx/RDS together. Verify RDS comes up
+(`aws rds describe-db-instances`) and the calendar-db-credentials Secret
+exists with a working DATABASE_URL before considering 4f done.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
