@@ -364,8 +364,26 @@ Decisions made (2026-07-08):
     the one creating).
   - Plan reviewed (6 to add, 0 to change, 0 to destroy) and applied cleanly.
 
-NEXT: infra/main/ - VPC, EKS, Karpenter, ALB controller, CNI/CSI add-ons,
-RDS, using infra/state-backend/'s bucket/table as a real remote backend.
+4b DONE (2026-07-08) - infra/main/ VPC:
+  - versions.tf: real remote backend (infra/state-backend/'s bucket/table),
+    unlike every other Terraform stack in this project so far (all local
+    state for bootstrap reasons). Noted a real Terraform behavior change hit
+    on init: `dynamodb_table` in the S3 backend block is now deprecated in
+    favor of native `use_lockfile` locking - kept DynamoDB anyway since
+    that's what the workplan and bootcamp material both explicitly teach,
+    and it's still fully functional (deprecated, not removed).
+  - terraform-aws-modules/vpc, 2 AZs, single NAT gateway (cost-optimized
+    choice, confirmed in the plan: exactly one NAT gateway + EIP created,
+    not one per AZ). Public subnets tagged kubernetes.io/role/elb=1,
+    private subnets tagged kubernetes.io/role/internal-elb=1 AND
+    karpenter.sh/discovery=calendar-eks - set now even though EKS/Karpenter
+    are later pieces, so auto-discovery isn't retrofitted.
+  - Plan reviewed (19 to add, 0 to change, 0 to destroy) and applied cleanly.
+    vpc_id=vpc-0d756381edabbc82b, 2 public + 2 private subnets across
+    us-east-1a/us-east-1b.
+
+NEXT: EKS cluster itself (terraform-aws-modules/eks), using this VPC's
+subnets, then Karpenter, ALB controller, CNI/CSI add-ons, RDS.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
