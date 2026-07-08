@@ -382,8 +382,38 @@ Decisions made (2026-07-08):
     vpc_id=vpc-0d756381edabbc82b, 2 public + 2 private subnets across
     us-east-1a/us-east-1b.
 
-NEXT: EKS cluster itself (terraform-aws-modules/eks), using this VPC's
-subnets, then Karpenter, ALB controller, CNI/CSI add-ons, RDS.
+4c DONE (2026-07-08) - infra/main/ EKS cluster:
+  - terraform-aws-modules/eks, control plane + 4 managed addons (coredns,
+    kube-proxy, vpc-cni, eks-pod-identity-agent). cluster_creator gets
+    cluster-admin automatically (enable_cluster_creator_admin_permissions).
+    Cluster's own OIDC provider created (needed for Karpenter/ALB-controller
+    IRSA, next pieces) - same mechanism as Step 1c's GitHub OIDC, different
+    issuer. Real version-drift hit: this module version (~>20.0 resolves to
+    20.37.2) removed `manage_aws_auth_configmap`, present in the bootcamp
+    reference stack's older version - dropped it, authentication_mode +
+    enable_cluster_creator_admin_permissions alone are enough via the newer
+    EKS Access Entries API.
+  - Original plan was zero EKS managed node groups at all - Karpenter
+    provisioning 100% of compute, with just a small Fargate profile for
+    Karpenter's own controller pods (matching the bootcamp reference stack).
+    REAL CORRECTION after the first apply attempt failed: kube-proxy and
+    vpc-cni are DaemonSets, which cannot run on Fargate at all (AWS platform
+    limitation) - and the coredns addon timed out after a full 20 minutes
+    stuck DEGRADED, because its pods had zero compute to schedule onto
+    (confirmed directly: `kubectl get nodes` showed nothing, coredns pods
+    Pending). Fixed with a tiny, fixed EKS managed node group (1x t3.small,
+    ON_DEMAND) dedicated to core system pods, separate from Karpenter which
+    still handles all actual application workload scaling. Re-apply: node
+    group up in 2m, and coredns (Terraform correctly marked it "tainted" and
+    destroyed+recreated it) went healthy in 16s once real compute existed -
+    confirmed via kubectl: 1 node Ready, every kube-system pod Running.
+  - Also hit and fixed live: I used the wrong VPC module output attribute
+    name (module.vpc.private_subnet_ids, which is this repo's OWN output
+    name, not the module's actual attribute module.vpc.private_subnets) -
+    caught immediately by `terraform validate`.
+
+NEXT: Karpenter (NodePool + EC2NodeClass, using the cluster's OIDC provider
+for its IRSA role), then ALB controller, RDS.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
