@@ -591,13 +591,48 @@ Decisions made (2026-07-08):
     `terraform apply` - saved as its own memory entry since this will
     matter every session from now on.
 
-NEXT: apply infra/main/ in two phases from the current fully-empty state -
-first `terraform apply -target module.vpc -target module.eks` (or re-apply
-4e's blocked-on-AWS-verification NLB piece may now succeed too, worth
-re-checking), then a second untargeted `terraform apply` for
-Karpenter/ALB-controller/ingress-nginx/RDS together. Verify RDS comes up
-(`aws rds describe-db-instances`) and the calendar-db-credentials Secret
-exists with a working DATABASE_URL before considering 4f done.
+4f DONE (2026-07-09) - phased re-apply confirmed the RDS design correct:
+  - Phase 1 (`terraform apply -target module.vpc -target module.eks`): 59
+    resources, clean, ~14 min (mostly the EKS control plane itself).
+  - Phase 2 (untargeted apply for everything else): Karpenter, ALB
+    controller IAM/Helm, and RDS all came up cleanly with ZERO further code
+    changes needed - real confirmation that the 4e/4f fixes made yesterday
+    (AddTags/DeleteSecurityGroup IAM gaps, manage_master_user_password) were
+    genuinely correct, not one-off luck. RDS instance reached `available` in
+    6m34s; `calendar-db-credentials` Secret verified in-cluster with a
+    working `postgresql://calendar:***@calendar-eks-db...:5432/calendar`
+    DATABASE_URL.
+  - ingress_nginx/NLB STILL blocked by the exact same AWS account
+    restriction as 4e, even after adding a payment method - confirmed via
+    ALB controller logs showing the identical `OperationNotPermitted`
+    message. This has now persisted past the original "24-48h" estimate,
+    so decided to stop guessing and have the user open a real AWS Support
+    case (Account and billing support, free tier) instead of continuing to
+    retry blind.
+  - Destroy (session end) hit the exact same two-part failure as 4e's
+    teardown: (1) `helm_release.ingress_nginx` uninstall hung on the
+    Service's `service.k8s.aws/resources` finalizer once the NAT gateway
+    was destroyed out from under the ALB controller pod - force-cleared via
+    `kubectl patch svc ... --type=merge` with empty finalizers (safe, no
+    real NLB ever existed); (2) two ALB-controller-created security groups
+    (`k8s-traffic-*`, `k8s-ingressn-*`) were left behind, invisible to
+    Terraform state, blocking `aws_vpc` deletion - found via
+    `aws ec2 describe-security-groups --filters Name=vpc-id,...` and
+    deleted by hand before resuming `terraform destroy`. Confirms this
+    isn't a one-off - it's the reliable failure mode whenever ingress_nginx
+    never got a real NLB and the stack gets destroyed anyway; already
+    covered by [[feedback_alb_controller_orphaned_sg_blocks_vpc_destroy]],
+    this run just re-validated the same playbook works cleanly the second
+    time. Final state confirmed fully clean: empty terraform state, no
+    VPC/EKS/RDS resources left in AWS.
+
+NEXT: once the AWS Support case resolves (or the account restriction is
+otherwise confirmed clear), phased re-apply again (VPC+EKS, then
+everything else) and this time expect ingress_nginx to succeed on the
+first try - no further code changes anticipated for 4e. After that,
+Step 4 (VPC/EKS/Karpenter/ingress/RDS) is fully complete; move to
+deploying the actual calendar app onto this real cluster via Argo CD
+(currently only points at kind), then Step 5.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
