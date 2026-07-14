@@ -41,6 +41,14 @@ module "eks" {
     eks-pod-identity-agent = {
       most_recent = true
     }
+    # Added for Step 6 HPA support - without this, HorizontalPodAutoscaler
+    # resources just show <unknown> targets forever (no Metrics API for
+    # them to read from). Confirmed available as a real EKS-managed addon
+    # via `aws eks describe-addon-versions --addon-name metrics-server`
+    # before adding, not assumed.
+    metrics-server = {
+      most_recent = true
+    }
   }
 
   # Real correction made after the first apply attempt: originally planned

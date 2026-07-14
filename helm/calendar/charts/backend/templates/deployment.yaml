@@ -5,7 +5,12 @@ metadata:
   labels:
     {{- include "backend.labels" . | nindent 4 }}
 spec:
+  # Omitted entirely when the HPA (hpa.yaml) is enabled - otherwise every
+  # `helm upgrade` would reassert replicaCount and briefly fight whatever
+  # replica count the HPA had actually scaled to.
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: backend
@@ -15,6 +20,12 @@ spec:
       labels:
         app.kubernetes.io/name: backend
         app.kubernetes.io/component: backend
+      annotations:
+        # Forces a pod restart when the ConfigMap's contents change - the
+        # Deployment only references it by name below, so without this a
+        # config-only change wouldn't roll pods at all. Same trick the
+        # frontend subchart already uses for its nginx ConfigMap.
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -26,11 +37,10 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.containerPort }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "calendar.backend.fullname" . }}-config
           env:
-            {{- range $key, $value := .Values.env }}
-            - name: {{ $key }}
-              value: {{ $value | quote }}
-            {{- end }}
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:

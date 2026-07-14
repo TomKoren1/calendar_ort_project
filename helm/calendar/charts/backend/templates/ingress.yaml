@@ -1,0 +1,39 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "calendar.backend.fullname" . }}
+  labels:
+    {{- include "backend.labels" . | nindent 4 }}
+  {{- if .Values.global.ingress.annotations }}
+  annotations:
+    {{- toYaml .Values.global.ingress.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.global.ingress.className }}
+  rules:
+    - {{- if .Values.global.ingress.host }}
+      host: {{ .Values.global.ingress.host }}
+      {{- end }}
+      http:
+        paths:
+          # Everything the backend serves is mounted under /api (including
+          # /api/health) - see backend/app.js - so one Prefix rule covers all
+          # of it. This replaces frontend/nginx.conf's old internal
+          # proxy_pass; the Ingress controller routes API traffic straight to
+          # this Service now instead of via a second proxy hop through the
+          # frontend pod.
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "calendar.backend.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+  {{- if .Values.global.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.global.ingress.host }}
+      secretName: {{ .Values.global.ingress.tls.secretName }}
+  {{- end }}
+{{- end }}

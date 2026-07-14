@@ -106,18 +106,25 @@ full kind workflow).
 - Frontend is plain React state (no Redux/Context/query library): `App.jsx` owns top-level state
   and layout, `api.js` is a thin fetch client (one object per resource), `components/` holds
   CalendarGrid/EventModal/Sidebar, `dateUtils.js` has month-grid date math.
-- Frontend talks to the backend via a relative `/api` path; in production this is proxied by
-  `frontend/nginx.conf` to the backend container/service — there is no hardcoded backend host
-  baked into the frontend build.
+- Frontend talks to the backend via a relative `/api` path. As of Step 6, this is routed at the
+  **Ingress** level — the backend subchart owns an `Ingress` matching `/api` (everything the
+  backend serves lives under that prefix, including `/api/health`), the frontend subchart owns
+  a separate `Ingress` matching `/`, and `ingress-nginx` merges both into one routing table.
+  `frontend/nginx.conf` no longer proxies `/api/*` itself (it did before Step 6) — it only serves
+  static assets and the SPA fallback now. There is still no hardcoded backend host baked into the
+  frontend build; the browser calls the same relative `/api` path either way.
 - Helm chart (`helm/calendar/`) is an umbrella chart: `charts/backend/` and `charts/frontend/` are
   independent subcharts (own `Chart.yaml`/`values.yaml`/templates, not designed for standalone
   install). Cross-subchart references (frontend's nginx config needs backend's Service name+port,
   the parent's ingress/migration-job need both) use naming helpers defined once in the *parent's*
   `_helpers.tpl` — see that file's own comment for why a subchart's own `.Chart.Name`-based helper
-  would silently resolve wrong when called across chart boundaries. The one genuinely
-  cross-subchart *value* (backend's service port, needed by frontend) goes through a `global:` key
-  in the parent `values.yaml`, deliberately duplicated with backend's own `values.yaml` rather than
-  making backend depend on a global for its own resources.
+  would silently resolve wrong when called across chart boundaries. Two genuinely cross-subchart
+  *values* go through a `global:` key in the parent `values.yaml` rather than being defined once
+  and referenced: backend's service port (needed by frontend, deliberately duplicated with
+  backend's own `values.yaml` rather than making backend depend on a global for its own
+  resources), and the shared `ingress.className`/`host`/`tls` config both subcharts' own
+  `Ingress` resources (Step 6 — each subchart owns and templates its own `Ingress` now, not a
+  single parent-level one) must agree on.
 - CI is split into two independent, path-filtered workflows —
   `.github/workflows/backend-ci.yml` and `.github/workflows/frontend-ci.yml` — each only triggers
   on changes to its own folder (or the shared root `package.json`/`package-lock.json`). Each runs

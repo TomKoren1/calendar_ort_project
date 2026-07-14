@@ -20,3 +20,16 @@ resources:
   limits:
     cpu: 200m
     memory: 64Mi
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1
+# See backend/values.yaml's comment - shared ingress config lives in the
+# parent chart's global.ingress; this is just this subchart's on/off switch.
+ingress:
+  enabled: true
+# See backend/values.yaml's comment - same metrics-server dependency.
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 4
+  targetCPUUtilizationPercentage: 75

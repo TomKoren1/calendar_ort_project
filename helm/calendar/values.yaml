@@ -7,32 +7,38 @@
 
 # Values every subchart can see, regardless of which one is currently
 # rendering (plain backend:/frontend: keys are only visible to that specific
-# subchart). Only used for the one genuine cross-subchart reference here:
-# frontend's nginx config needs to know backend's Service port. Deliberately
-# duplicated with charts/backend/values.yaml's own service.port rather than
-# making backend depend on a global for its own resources - keep both in
-# sync if backend's port ever changes.
+# subchart). Two genuine cross-subchart references live here:
+# - backend.servicePort: frontend's nginx config needs to know backend's
+#   Service port. Deliberately duplicated with charts/backend/values.yaml's
+#   own service.port rather than making backend depend on a global for its
+#   own resources - keep both in sync if backend's port ever changes.
+# - ingress.*: both subcharts now own their own Ingress resource (Step 6,
+#   split from a single parent-level Ingress - see workplan.txt), but they
+#   must agree on the same host/className/TLS config, so those live here
+#   once instead of being duplicated per-subchart. Each subchart still has
+#   its own local ingress.enabled, since enabling one independently of the
+#   other is a real, useful toggle (e.g. testing the backend's API surface
+#   without exposing the frontend).
 global:
   backend:
     servicePort: 3001
+  ingress:
+    # className: nginx (not alb) - see workplan.txt Step 4e for why: source IP
+    # preservation, richer L7 feature set, and no AWS-specific Ingress
+    # annotations locking this chart to EKS. host is deliberately empty
+    # (matches any Host header) since this project has no owned domain -
+    # reached directly via the NLB's own AWS-generated hostname instead of a
+    # custom domain. No TLS for the same reason (no domain to issue a real
+    # cert for).
+    className: nginx
+    host: ""
+    annotations: {}
+    tls:
+      enabled: false
+      secretName: calendar-tls
 
 # Runs node-pg-migrate (via the backend image) once per install/upgrade,
 # before backend pods roll out, so replicas never race each other applying
 # schema changes.
 migration:
   enabled: true
-
-# className: nginx (not alb) - see workplan.txt Step 4e for why: source IP
-# preservation, richer L7 feature set, and no AWS-specific Ingress
-# annotations locking this chart to EKS. host is deliberately empty (matches
-# any Host header) since this project has no owned domain - reached directly
-# via the NLB's own AWS-generated hostname instead of a custom domain. No TLS
-# for the same reason (no domain to issue a real cert for).
-ingress:
-  enabled: true
-  className: nginx
-  host: ""
-  annotations: {}
-  tls:
-    enabled: false
-    secretName: calendar-tls

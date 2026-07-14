@@ -18,6 +18,12 @@ backend:
   imagePullSecrets:
     - name: ecr-pull-secret
   replicaCount: 1
+  # kind has no ingress controller installed; Argo/kubectl port-forward is how you reach it.
+  ingress:
+    enabled: false
+  # kind has no metrics-server installed - HPA would just show <unknown> forever.
+  autoscaling:
+    enabled: false
 
 frontend:
   image:
@@ -25,7 +31,7 @@ frontend:
   imagePullSecrets:
     - name: ecr-pull-secret
   replicaCount: 1
-
-# kind has no AWS ALB controller; Argo/kubectl port-forward is how you reach it.
-ingress:
-  enabled: false
+  ingress:
+    enabled: false
+  autoscaling:
+    enabled: false

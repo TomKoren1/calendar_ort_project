@@ -8,6 +8,8 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/backend-ci.yml"
+      - ".github/workflows/build-and-push.yml"
+      - ".github/actions/setup-workspace/**"
   pull_request:
     branches: [main]
     paths:
@@ -15,6 +17,8 @@ on:
       - "package.json"
       - "package-lock.json"
       - ".github/workflows/backend-ci.yml"
+      - ".github/workflows/build-and-push.yml"
+      - ".github/actions/setup-workspace/**"
 
 jobs:
   test:
@@ -38,14 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: package-lock.json
-
-      - name: Install dependencies (npm workspaces - backend + frontend)
-        run: npm ci
+      - uses: ./.github/actions/setup-workspace
 
       - name: Run migrations
         working-directory: backend
@@ -58,41 +55,12 @@ jobs:
   build-and-push:
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ vars.AWS_GITHUB_ACTIONS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - uses: aws-actions/amazon-ecr-login@v2
-        id: ecr-login
-
-      - uses: docker/setup-buildx-action@v3
-
-      - name: Build and push backend image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          push: true
-          tags: |
-            ${{ steps.ecr-login.outputs.registry }}/calendar-backend:${{ github.sha }}
-            ${{ steps.ecr-login.outputs.registry }}/calendar-backend:latest
-
-      - name: Bump backend image tag in Git (GitOps loop - Argo CD watches this file)
-        run: |
-          yq -i '.image.tag = "${{ github.sha }}"' helm/calendar/charts/backend/values.yaml
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add helm/calendar/charts/backend/values.yaml
-          git commit -m "chore(backend): bump image tag to ${{ github.sha }}"
-          for i in 1 2 3; do
-            git pull --rebase origin main && git push origin HEAD:main && break
-            sleep 3
-          done
+    uses: ./.github/workflows/build-and-push.yml
+    with:
+      image-name: calendar-backend
+      dockerfile: backend/Dockerfile
+      chart-values-path: helm/calendar/charts/backend/values.yaml
+      commit-scope: backend

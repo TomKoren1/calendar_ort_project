@@ -5,6 +5,12 @@ backend:
     tag: local
     pullPolicy: IfNotPresent
   replicaCount: 1
+  # kind has no ingress controller installed; reach the app via port-forward instead.
+  ingress:
+    enabled: false
+  # kind has no metrics-server installed - HPA would just show <unknown> forever.
+  autoscaling:
+    enabled: false
 
 frontend:
   image:
@@ -12,7 +18,7 @@ frontend:
     tag: local
     pullPolicy: IfNotPresent
   replicaCount: 1
-
-# kind has no AWS ALB controller; reach the app via port-forward instead.
-ingress:
-  enabled: false
+  ingress:
+    enabled: false
+  autoscaling:
+    enabled: false

@@ -1,0 +1,38 @@
+{{- if .Values.ingress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "calendar.frontend.fullname" . }}
+  labels:
+    {{- include "frontend.labels" . | nindent 4 }}
+  {{- if .Values.global.ingress.annotations }}
+  annotations:
+    {{- toYaml .Values.global.ingress.annotations | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.global.ingress.className }}
+  rules:
+    - {{- if .Values.global.ingress.host }}
+      host: {{ .Values.global.ingress.host }}
+      {{- end }}
+      http:
+        paths:
+          # Catch-all: static assets + client-side routed SPA paths.
+          # Deliberately placed after the backend's /api Ingress at the
+          # controller level - ingress-nginx merges Ingress objects and
+          # matches the most specific path first, so /api still reaches the
+          # backend even though both rules technically overlap at "/".
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "calendar.frontend.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+  {{- if .Values.global.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.global.ingress.host }}
+      secretName: {{ .Values.global.ingress.tls.secretName }}
+  {{- end }}
+{{- end }}
