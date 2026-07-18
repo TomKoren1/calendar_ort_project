@@ -8,7 +8,7 @@ Creates the minimum AWS infrastructure CI needs to push images to ECR via OIDC, 
 - An IAM role only `push`-to-`main` workflow runs on this exact repo can assume, scoped to
   push-only permissions on just these two repositories
 
-Deliberately uses **local Terraform state** (not S3/DynamoDB) — this stack's job is partly to
+Deliberately uses **local Terraform state** (not S3) — this stack's job is partly to
 provide the account with its first pieces of durable infra, so it can't depend on a remote
 backend that would itself need bootstrapping. Everything from Step 4 onward uses remote state.
 

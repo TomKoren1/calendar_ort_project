@@ -51,25 +51,13 @@ module "eks" {
     }
   }
 
-  # Real correction made after the first apply attempt: originally planned
-  # zero EKS managed node groups at all (Karpenter provisions everything).
-  # That doesn't work for core cluster system pods specifically -
-  # kube-proxy/vpc-cni are DaemonSets, which CANNOT run on Fargate at all
-  # (an AWS platform limitation, not a config issue), and the coredns addon
-  # timed out after 20 minutes stuck DEGRADED waiting for compute that never
-  # existed. A tiny, fixed system node group (not Karpenter-managed) is the
-  # standard fix - Karpenter still handles all actual application workload
-  # scaling, this just hosts the handful of pods every cluster needs
-  # regardless of Karpenter's existence.
-  #
-  # Second correction, same theme: originally gave Karpenter's own controller
-  # a small Fargate profile to run on. That controller pod then crash-looped
-  # on Fargate specifically - DNS lookups for sts.us-east-1.amazonaws.com
-  # (needed for its IRSA credentials) consistently timed out, a real Fargate
-  # networking issue, not a config mistake (security groups/routing all
-  # checked out fine). Removed the Fargate profile entirely; Karpenter's
-  # controller now schedules onto this same system node group instead, which
-  # already has proven-working networking (it successfully pulls from ECR).
+  # A tiny, fixed system node group (not Karpenter-managed) hosts the handful
+  # of pods every cluster needs regardless of Karpenter's existence
+  # (coredns/kube-proxy/vpc-cni are DaemonSets, which cannot run on Fargate at
+  # all - an AWS platform limitation hit live in Step 4c). Karpenter (in the
+  # platform-addons module) still handles all actual application workload
+  # scaling. Same fixed size for both dev and staging - this is cluster
+  # plumbing, not something either environment tier needs to vary.
   eks_managed_node_groups = {
     system = {
       name           = "${var.cluster_name}-system"
@@ -88,8 +76,9 @@ module "eks" {
 }
 
 # The EKS module doesn't expose a tags input for the cluster/node security
-# groups it creates itself - tag them directly so Karpenter (next piece) can
-# find them via the same discovery mechanism used for the VPC's subnets.
+# groups it creates itself - tag them directly so Karpenter (platform-addons
+# module) can find them via the same discovery mechanism used for the VPC's
+# subnets.
 resource "aws_ec2_tag" "cluster_security_group_karpenter" {
   resource_id = module.eks.cluster_security_group_id
   key         = "karpenter.sh/discovery"

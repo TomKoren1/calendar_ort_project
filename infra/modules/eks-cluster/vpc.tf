@@ -36,7 +36,9 @@ module "vpc" {
   # NAT gateway shared across AZs, not one per AZ. A real always-on prod
   # setup would want per-AZ NAT gateways so a single AZ outage doesn't take
   # out egress for the whole cluster - not a concern for a cluster that's
-  # only up for the length of a working session.
+  # only up for the length of a working session. Same for both dev and
+  # staging environments here - the tier difference this project actually
+  # demonstrates is capacity-type/multi-AZ RDS/replica counts, not NAT HA.
   single_nat_gateway   = true
   enable_dns_hostnames = true
   enable_dns_support   = true

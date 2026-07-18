@@ -18,6 +18,11 @@ data "aws_iam_policy_document" "aws_load_balancer_controller" {
     }
   }
 
+  # Real error hit live: AccessDenied on
+  # elasticloadbalancing:DescribeListenerAttributes, once the AddTags gap
+  # above was already fixed - a third gap in the copied reference policy.
+  # This is a newer ELBv2 API (listener-level idle-timeout attributes) that
+  # older reference material predates entirely, not just under-scopes.
   statement {
     effect = "Allow"
     actions = [
@@ -28,6 +33,7 @@ data "aws_iam_policy_document" "aws_load_balancer_controller" {
       "ec2:DescribeCoipPools",
       "elasticloadbalancing:DescribeLoadBalancers", "elasticloadbalancing:DescribeLoadBalancerAttributes",
       "elasticloadbalancing:DescribeListeners", "elasticloadbalancing:DescribeListenerCertificates",
+      "elasticloadbalancing:DescribeListenerAttributes",
       "elasticloadbalancing:DescribeSSLPolicies", "elasticloadbalancing:DescribeRules",
       "elasticloadbalancing:DescribeTargetGroups", "elasticloadbalancing:DescribeTargetGroupAttributes",
       "elasticloadbalancing:DescribeTargetHealth", "elasticloadbalancing:DescribeTags",
@@ -126,6 +132,13 @@ data "aws_iam_policy_document" "aws_load_balancer_controller" {
   # unconditional allow on these ARNs - a deliberate least-privilege
   # trade-off, same call as Karpenter's controller policy fix, favoring
   # "actually works" over maximal scoping for this learning project.
+  #
+  # Second real error hit live, same statement: AccessDenied on AddTags
+  # again, this time on a *listener* ARN specifically - the resource list
+  # only covered targetgroup/loadbalancer, matching the reference material,
+  # but v3.4.1 also tags the listener it just created via a separate AddTags
+  # call (not inline on CreateListener). Added listener/listener-rule ARN
+  # patterns to close this gap too.
   statement {
     effect  = "Allow"
     actions = ["elasticloadbalancing:AddTags", "elasticloadbalancing:RemoveTags"]
@@ -133,6 +146,10 @@ data "aws_iam_policy_document" "aws_load_balancer_controller" {
       "arn:aws:elasticloadbalancing:*:*:targetgroup/*/*",
       "arn:aws:elasticloadbalancing:*:*:loadbalancer/net/*/*",
       "arn:aws:elasticloadbalancing:*:*:loadbalancer/app/*/*",
+      "arn:aws:elasticloadbalancing:*:*:listener/net/*/*/*",
+      "arn:aws:elasticloadbalancing:*:*:listener/app/*/*/*",
+      "arn:aws:elasticloadbalancing:*:*:listener-rule/net/*/*/*",
+      "arn:aws:elasticloadbalancing:*:*:listener-rule/app/*/*/*",
     ]
   }
 
@@ -179,17 +196,17 @@ data "aws_iam_policy_document" "aws_load_balancer_controller_assume_role" {
 
     principals {
       type        = "Federated"
-      identifiers = [module.eks.oidc_provider_arn]
+      identifiers = [var.oidc_provider_arn]
     }
 
     condition {
       test     = "StringEquals"
-      variable = "${module.eks.oidc_provider}:sub"
+      variable = "${var.oidc_provider}:sub"
       values   = ["system:serviceaccount:kube-system:aws-load-balancer-controller"]
     }
     condition {
       test     = "StringEquals"
-      variable = "${module.eks.oidc_provider}:aud"
+      variable = "${var.oidc_provider}:aud"
       values   = ["sts.amazonaws.com"]
     }
   }
@@ -217,9 +234,9 @@ resource "helm_release" "aws_load_balancer_controller" {
 
   values = [
     yamlencode({
-      clusterName = module.eks.cluster_name
+      clusterName = var.cluster_name
       region      = var.aws_region
-      vpcId       = module.vpc.vpc_id
+      vpcId       = var.vpc_id
       serviceAccount = {
         create = true
         name   = "aws-load-balancer-controller"
@@ -227,15 +244,13 @@ resource "helm_release" "aws_load_balancer_controller" {
           "eks.amazonaws.com/role-arn" = aws_iam_role.aws_load_balancer_controller.arn
         }
       }
-      replicaCount = 1 # single replica - fine for a small, short-lived cluster
+      replicaCount = var.addon_replica_count
       resources = {
         requests = { cpu = "100m", memory = "128Mi" }
         limits   = { memory = "256Mi" }
       }
     })
   ]
-
-  depends_on = [module.eks]
 }
 
 # ingress-nginx: does the actual Layer 7 (host/path) routing. Its own Service
@@ -255,7 +270,7 @@ resource "helm_release" "ingress_nginx" {
   values = [
     yamlencode({
       controller = {
-        replicaCount = 1 # single replica - fine for a small, short-lived cluster
+        replicaCount = var.addon_replica_count
         resources = {
           requests = { cpu = "100m", memory = "128Mi" }
           limits   = { memory = "256Mi" }
@@ -281,9 +296,4 @@ resource "helm_release" "ingress_nginx" {
   ]
 
   depends_on = [helm_release.aws_load_balancer_controller]
-}
-
-output "ingress_nginx_hostname_command" {
-  description = "Run this after apply to get the NLB hostname to reach the app at"
-  value       = "kubectl get svc -n ingress-nginx ingress-nginx-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'"
 }

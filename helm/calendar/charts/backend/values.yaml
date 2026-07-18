@@ -32,7 +32,7 @@ podDisruptionBudget:
 # switch.
 ingress:
   enabled: true
-# Requires the metrics-server EKS addon (infra/main/eks.tf) - disabled for
+# Requires the metrics-server EKS addon (infra/modules/eks-cluster/eks.tf) - disabled for
 # local-dev/values-kind*.yaml, which has no metrics-server installed.
 autoscaling:
   enabled: true

@@ -1,13 +1,6 @@
-variable "aws_region" {
-  description = "AWS region for all resources in this stack"
-  type        = string
-  default     = "us-east-1"
-}
-
 variable "cluster_name" {
-  description = "EKS cluster name - used now for VPC subnet auto-discovery tags, and later by the EKS module itself"
+  description = "EKS cluster name - used for VPC subnet auto-discovery tags and the EKS module itself"
   type        = string
-  default     = "calendar-eks"
 }
 
 variable "vpc_cidr" {

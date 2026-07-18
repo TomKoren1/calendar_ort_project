@@ -1,16 +1,16 @@
 # Karpenter provisions compute for APPLICATION workloads only (backend/
 # frontend pods) - core system pods (coredns/kube-proxy/vpc-cni) already run
-# on the fixed "system" EKS managed node group from eks.tf, so there's no
-# need to migrate them onto Karpenter-provisioned nodes at all.
+# on the fixed "system" EKS managed node group from the eks-cluster module,
+# so there's no need to migrate them onto Karpenter-provisioned nodes at all.
 
 module "karpenter" {
   source  = "terraform-aws-modules/eks/aws//modules/karpenter"
   version = "~> 20.0"
 
-  cluster_name = module.eks.cluster_name
+  cluster_name = var.cluster_name
 
   enable_irsa            = true
-  irsa_oidc_provider_arn = module.eks.oidc_provider_arn
+  irsa_oidc_provider_arn = var.oidc_provider_arn
 
   create_node_iam_role          = true
   node_iam_role_use_name_prefix = false
@@ -86,7 +86,7 @@ data "aws_iam_policy_document" "karpenter_controller_extra" {
   statement {
     sid       = "AllowAPIServerEndpointDiscovery"
     actions   = ["eks:DescribeCluster"]
-    resources = [module.eks.cluster_arn]
+    resources = [var.cluster_arn]
   }
 }
 
@@ -119,8 +119,8 @@ resource "helm_release" "karpenter" {
   values = [
     yamlencode({
       settings = {
-        clusterName     = module.eks.cluster_name
-        clusterEndpoint = module.eks.cluster_endpoint
+        clusterName     = var.cluster_name
+        clusterEndpoint = var.cluster_endpoint
       }
       serviceAccount = {
         name = "karpenter"
@@ -128,7 +128,7 @@ resource "helm_release" "karpenter" {
           "eks.amazonaws.com/role-arn" = module.karpenter.iam_role_arn
         }
       }
-      replicas = 1 # single controller replica - fine for a small, short-lived cluster
+      replicas = var.addon_replica_count
       # Explicit modest requests - the chart's own defaults are sized for a
       # bigger node than our t3.small system node group, which also hosts
       # coredns/kube-proxy/vpc-cni/eks-pod-identity-agent.
@@ -145,8 +145,6 @@ resource "helm_release" "karpenter" {
       }
     })
   ]
-
-  depends_on = [module.eks]
 }
 
 resource "kubectl_manifest" "ec2_node_class_default" {
@@ -192,13 +190,15 @@ resource "kubectl_manifest" "node_pool_general" {
             name  = "default"
           }
           requirements = [
-            # Cost-optimized: spot first (falls back to on-demand if none
-            # available), small/cheap instance sizes only - matches this
-            # whole stack's apply-and-destroy-per-session design.
-            { key = "karpenter.sh/capacity-type", operator = "In", values = ["spot", "on-demand"] },
+            # Cost-optimized default: spot first (falls back to on-demand if
+            # none available) for dev, on-demand only for staging - see
+            # var.karpenter_capacity_types. Small/cheap instance sizes only
+            # either way, matching this whole stack's apply-and-destroy-per-
+            # session design.
+            { key = "karpenter.sh/capacity-type", operator = "In", values = var.karpenter_capacity_types },
             { key = "kubernetes.io/arch", operator = "In", values = ["amd64"] },
             { key = "karpenter.k8s.aws/instance-category", operator = "In", values = ["t"] },
-            { key = "karpenter.k8s.aws/instance-size", operator = "In", values = ["small", "medium"] },
+            { key = "karpenter.k8s.aws/instance-size", operator = "In", values = var.karpenter_instance_sizes },
           ]
         }
       }

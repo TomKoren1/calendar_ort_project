@@ -6,18 +6,17 @@ data "aws_caller_identity" "current" {}
 # instead of something you'd need to look up.
 locals {
   state_bucket_name = "calendar-terraform-state-${data.aws_caller_identity.current.account_id}"
-  lock_table_name   = "calendar-terraform-locks"
 }
 
 resource "aws_s3_bucket" "state" {
   bucket = local.state_bucket_name
 
-  # This bucket holds the state for infra/main/, which gets destroyed and
-  # recreated regularly on purpose - but the STATE BUCKET ITSELF must never
-  # go with it, or every future `terraform apply` in infra/main/ would think
-  # it's creating everything from scratch (real risk of duplicate/orphaned
-  # AWS resources). `terraform destroy` in this directory refuses unless this
-  # is removed first, on purpose.
+  # This bucket holds the state for infra/environments/{dev,staging}/, both of
+  # which get destroyed and recreated regularly on purpose - but the STATE
+  # BUCKET ITSELF must never go with them, or a future `terraform apply` in
+  # either environment would think it's creating everything from scratch
+  # (real risk of duplicate/orphaned AWS resources). `terraform destroy` in
+  # this directory refuses unless this is removed first, on purpose.
   lifecycle {
     prevent_destroy = true
   }
@@ -72,19 +71,4 @@ data "aws_iam_policy_document" "state_tls_only" {
 resource "aws_s3_bucket_policy" "state_tls_only" {
   bucket = aws_s3_bucket.state.id
   policy = data.aws_iam_policy_document.state_tls_only.json
-}
-
-resource "aws_dynamodb_table" "locks" {
-  name         = local.lock_table_name
-  billing_mode = "PAY_PER_REQUEST" # no idle cost - this table is tiny/low-traffic
-  hash_key     = "LockID"
-
-  attribute {
-    name = "LockID"
-    type = "S"
-  }
-
-  lifecycle {
-    prevent_destroy = true
-  }
 }

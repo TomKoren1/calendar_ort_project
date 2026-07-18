@@ -1,4 +1,4 @@
-# RDS Postgres - the one piece of infra/main/ whose data does NOT survive a
+# RDS Postgres - the one piece of this stack whose data does NOT survive a
 # destroy/recreate cycle (accepted trade-off, matches how the kind cluster's
 # local Postgres is already treated - see workplan.txt Step 4 intro).
 #
@@ -25,14 +25,14 @@ resource "random_password" "rds" {
 resource "aws_security_group" "rds" {
   name_prefix = "${var.cluster_name}-rds-"
   description = "Allow Postgres from EKS nodes only"
-  vpc_id      = module.vpc.vpc_id
+  vpc_id      = var.vpc_id
 
   ingress {
     description     = "Postgres from EKS nodes"
     from_port       = 5432
     to_port         = 5432
     protocol        = "tcp"
-    security_groups = [module.eks.node_security_group_id]
+    security_groups = [var.node_security_group_id]
   }
 
   egress {
@@ -63,8 +63,8 @@ module "rds" {
   engine_version       = "17.10" # checked actual available versions via `aws rds describe-db-engine-versions`, not assumed
   family               = "postgres17"
   major_engine_version = "17"
-  instance_class       = "db.t4g.micro" # smallest current-gen (Graviton) burstable class - cheapest fit for a learning-project workload
-  allocated_storage    = 20             # gp3 minimum for Postgres
+  instance_class       = var.rds_instance_class
+  allocated_storage    = 20 # gp3 minimum for Postgres
   storage_type         = "gp3"
   storage_encrypted    = true
 
@@ -82,11 +82,11 @@ module "rds" {
   # Step 4f.
   manage_master_user_password = false
 
-  multi_az            = false # cost-optimized, agreed trade-off (see workplan.txt Step 4 intro) - no automatic failover
+  multi_az            = var.rds_multi_az # false (dev, cost) or true (staging, HA demonstration) - see variables.tf
   publicly_accessible = false
 
   create_db_subnet_group = true
-  subnet_ids             = module.vpc.private_subnets
+  subnet_ids             = var.private_subnet_ids
   vpc_security_group_ids = [aws_security_group.rds.id]
 
   # Ephemeral by design - this whole stack is destroyed at the end of every

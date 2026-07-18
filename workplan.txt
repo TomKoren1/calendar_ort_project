@@ -634,12 +634,204 @@ Step 4 (VPC/EKS/Karpenter/ingress/RDS) is fully complete; move to
 deploying the actual calendar app onto this real cluster via Argo CD
 (currently only points at kind), then Step 5.
 
+4g DONE (2026-07-15) - split infra/main into modules + dev/staging
+   environments:
+  - Prompted by feedback from the user's course teacher (notes/to-do): show
+    environment separation "at the variable level and folder level", and
+    confirm module usage matches best practice. Reviewed against
+    C:\devops\Study_ort\all_study\bootCamp\05-terraform (07-project-structure,
+    11-modules-and-reusability) and 06-terragrunt before touching any code -
+    module usage was already correct (registry modules throughout, no
+    wrapper-with-no-value-add anti-pattern); the real gap was that infra/main
+    was a single flat stack with hardcoded variable defaults and no
+    terraform.tfvars, which matches the bootcamp's own guidance for a
+    genuinely single-environment project but doesn't demonstrate the
+    Example-02/03 folder+variable pattern being asked for.
+  - Decided WITH the user (not just for the teacher's sake) to stand up a
+    second, real "staging" environment rather than a never-applied
+    demonstration folder - justified because this whole stack is already
+    applied-and-destroyed every session, so a second environment costs
+    little extra as long as dev and staging are never run simultaneously.
+  - infra/main/ split into infra/modules/eks-cluster/ (vpc.tf + eks.tf,
+    unchanged logic, cluster_name/vpc_cidr/azs as inputs) and
+    infra/modules/platform-addons/ (karpenter.tf + ingress-nginx.tf +
+    rds.tf, cluster identity/network values passed in as plain input
+    variables from the caller - not terraform_remote_state, since both
+    modules are called from the same root in the same apply).
+  - Real, deliberate reason it's TWO modules, not one: provider.tf's
+    helm/kubectl/kubernetes blocks depend on module.eks's own outputs (this
+    is why 4f needed a phased -target apply in the first place). Terraform
+    provider blocks must live in the calling root, not inside a module, so
+    bundling karpenter/ingress-nginx (which need those providers) into the
+    SAME module as vpc/eks would make the whole module unplannable in one
+    pass with no way to target just the cluster part first. Splitting
+    preserves the exact same phased-apply shape 4f already proved out, just
+    packaged for reuse across environments.
+  - infra/environments/dev/ and infra/environments/staging/ added - each a
+    thin caller (versions.tf/provider.tf/variables.tf/terraform.tfvars/
+    main.tf/outputs.tf) of the two modules above, sharing infra/state-backend/'s
+    S3 bucket + DynamoDB table with a different state key
+    (environments/{dev,staging}/terraform.tfstate) - matches the bootcamp's
+    "Golden Rule: each environment gets its own state file".
+  - Kept the dev-vs-staging difference intentionally small - just enough to
+    be a genuine, defensible tier, not new complexity for its own sake:
+    cluster_name (avoids any naming collision), Karpenter capacity-type
+    (dev: spot+on-demand, staging: on-demand only), RDS multi_az (dev:
+    false, staging: true - the same knob the bootcamp's own database-layer
+    example calls out by name), and addon replica counts (dev: 1, staging:
+    2). VPC CIDR, AZ count, single-NAT strategy, RDS instance class, and
+    node instance types stay identical - no reason to invent extra
+    differentiators the teacher's note didn't ask for.
+  - Explicitly did NOT adopt Terragrunt for this - the bootcamp material
+    itself frames it as solving pain from 3+ near-identical environments,
+    and calls adopting it before that pain exists its own anti-pattern.
+    Each environment's ~35-line provider.tf duplication is the one piece
+    plain Terraform genuinely cannot deduplicate (provider config must live
+    in the root); documented as a known, accepted gap in
+    infra/environments/README.md, revisit only if a third environment is
+    ever added.
+  - infra/main/'s old state key (main/terraform.tfstate) was empty at the
+    time of this restructure (confirmed via `terraform state list` before
+    starting), so this was a clean cutover to the new
+    environments/dev/terraform.tfstate key, not a state migration.
+  - Updated all infra/main references across the repo (infra/state-backend/'s
+    README.md/main.tf/outputs.tf/versions.tf, helm/calendar/charts/backend/
+    values.yaml's metrics-server comment) to point at the new module/
+    environment paths.
+  - Added README.md to infra/environments/ (dev-vs-staging comparison table,
+    usage, why the provider.tf duplication is accepted) and to each new
+    module (inputs/outputs) - matches the bootcamp's own "no README -
+    undocumented modules are landmines" guidance.
+  - Verification done via terraform init/validate/plan only (not apply) in
+    both environments - deliberately avoided a real apply for this
+    structural change alone, given real AWS cost; applying dev/staging for
+    real is a separate follow-up.
+
+4h DONE (2026-07-17) - dropped DynamoDB state locking for native S3
+   locking:
+  - Noticed AWS console now surfaces S3 Object Lock as a bucket option;
+    checked whether it should replace the DynamoDB lock table. Clarified
+    first that Object Lock (WORM/compliance retention) is NOT the
+    mechanism involved - the real upgrade is Terraform 1.10's own
+    `use_lockfile` S3 backend setting (an atomic conditional PutObject
+    creates a companion .tflock object), which is what the deprecation
+    warning seen during 4g's `terraform plan` ("dynamodb_table is
+    deprecated, use use_lockfile instead") was actually pointing at.
+    Object Lock would have been the wrong fit - a retention policy on the
+    bucket would risk blocking the state file's own overwrites.
+  - Confirmed installed Terraform (v1.15.7) comfortably exceeds the 1.10
+    floor before changing anything.
+  - infra/state-backend/main.tf: removed aws_dynamodb_table.locks and its
+    lock_table_name local entirely - locking is now purely a client-side
+    backend setting, nothing left to provision. outputs.tf: removed
+    lock_table_name output to match.
+  - infra/environments/dev/versions.tf and staging/versions.tf: backend
+    "s3" blocks swapped `dynamodb_table = "calendar-terraform-locks"` for
+    `use_lockfile = true`; required_version bumped from >= 1.5 to >= 1.10
+    on both (state-backend/versions.tf itself left at >= 1.5 since it
+    uses local state and never touches use_lockfile).
+  - Updated all README/comment references to the old bucket+table pairing
+    (infra/state-backend/README.md, infra/environments/README.md,
+    infra/bootstrap/README.md + versions.tf) to reflect S3-only.
+  - Re-validated all three stacks (state-backend, dev, staging) via
+    terraform validate after the edits - all pass; dev/staging backend
+    re-init confirmed the deprecation warning is gone.
+  - Applied for real in infra/state-backend/ (the one stack in this repo
+    meant to be applied once and left running) - plan showed exactly one
+    resource to destroy (aws_dynamodb_table.locks, no bucket/policy
+    changes), applied, and confirmed via `aws dynamodb list-tables` that
+    the table is actually gone from the account, not just out of
+    Terraform's state.
+  - Also used this session to confirm the earlier AWS "OperationNotPermitted"
+    load-balancer-creation restriction is still active on this account
+    (tested with a real, immediately-failed create-load-balancer call, not
+    just re-reading the old error) - despite the terraform-bootstrap IAM
+    user now being 11+ days old, so it isn't purely the 24-48h new-account
+    timer; likely needs an AWS Support case to lift. Blocks a real
+    dev/staging apply from reaching the ingress-nginx/NLB step until
+    resolved - noted as an open blocker, not yet pursued.
+
+4i DONE (2026-07-18) - real end-to-end apply of infra/environments/dev/,
+   proving the whole Step 4g/4h design against a second AWS account:
+  - The primary account's load-balancer restriction (4h) was still active
+    when re-checked at the start of this session - confirmed via a second
+    real create-load-balancer attempt, same OperationNotPermitted error.
+    Rather than wait on an AWS Support case, tested against a second,
+    already-available AWS account ("calendar-alt") instead - confirmed
+    NLB creation actually works there via a real create/delete round trip
+    before investing further.
+  - Scoped deliberately as a temporary, local-only detour, not a permanent
+    account switch: only local Terraform applies move to calendar-alt's
+    credentials (via a named AWS CLI profile + AWS_PROFILE env var, the
+    standard credential-chain mechanism - no code changes needed for this
+    part). infra/bootstrap/ and GitHub Actions CI's OIDC role/ECR repos
+    stay on the original account untouched.
+  - infra/state-backend/'s S3 bucket is account-scoped by name
+    (calendar-terraform-state-<account_id>), so calendar-alt needed its
+    own copy of that bucket - applied via a Terraform *workspace*
+    (`terraform workspace new calendar-alt`), not a second directory or a
+    hacky bucket-name override; workspaces are the built-in mechanism for
+    multiple independent state files under one local-backend config.
+    infra/environments/dev/versions.tf's backend "s3" bucket was then
+    temporarily repointed at the new bucket (marked with a # TEMP
+    comment) - reverting this, and destroying the calendar-alt resources,
+    is tracked as explicit follow-up, not done as part of this entry.
+  - Ran the full phased apply for real for the first time: `apply -target
+    module.cluster` (62 resources - VPC/EKS/node group/KMS/addons, ~13min,
+    clean), then full `apply` (Karpenter, AWS Load Balancer Controller,
+    ingress-nginx, RDS).
+  - Two real, live-discovered IAM policy gaps found and fixed in
+    infra/modules/platform-addons/ingress-nginx.tf's AWS Load Balancer
+    Controller policy (same class of gap as the two already documented
+    inline there from Step 4e - a copied reference IAM policy that
+    doesn't fully match what controller v3.4.1 actually calls):
+    1. elasticloadbalancing:AddTags/RemoveTags's resource list covered
+       targetgroup/loadbalancer ARNs but not listener/listener-rule ARNs -
+       the controller tags a listener via a separate AddTags call right
+       after creating it, not inline on CreateListener.
+    2. elasticloadbalancing:DescribeListenerAttributes was missing
+       entirely from the read-only Describe* statement - a newer ELBv2
+       API (listener-level idle-timeout attributes) that predates the
+       original reference material.
+  - Real operational gotcha hit twice, independent of the IAM gaps
+    themselves: once a helm_release resource is in Helm's own "failed"
+    state, Terraform's helm provider does uninstall-then-reinstall on the
+    next apply - and that uninstall got stuck twice on
+    DeleteSecurityGroup: DependencyViolation, because AWS's ENI-detachment
+    bookkeeping lags a few seconds behind the load balancer actually being
+    deleted. The AWS Load Balancer Controller's own reconcile loop did NOT
+    retry promptly on its own once that error hit (~8+ min observed with
+    no further attempt). Fix both times: confirm via `aws ec2
+    describe-network-interfaces --filters Name=group-id,...` that the
+    security group's dependents have actually cleared, then `kubectl
+    delete pod -n kube-system -l app.kubernetes.io/name=aws-load-balancer-
+    controller` to force the controller to resync its full watch cache -
+    NOT deleting the stuck Service/finalizer directly (that would skip the
+    controller's own AWS-side cleanup, the same class of mistake already
+    hit and documented once before in this project).
+  - Verified fully working end-to-end after the fixes: real NLB with a
+    live AWS hostname, curl against it returns HTTP 404 from nginx itself
+    (proof the full path - DNS, NLB, target group, ingress-nginx pod - all
+    actually works, just nothing deployed to `/` yet), all pods Running
+    across ingress-nginx/karpenter/kube-system, RDS instance `available`.
+
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
 ============================================================
-- Base step: install kube-prometheus-stack in the cluster (via Argo CD from
-  Step 3) to get default cluster/node monitoring, Prometheus, Alertmanager,
-  and Grafana out of the box.
+Reviewed and clarified before starting any implementation (per project convention).
+
+- Deploy mechanism decided WITH the user (2026-07-18): Terraform, not Argo CD - a new
+  helm_release resource in infra/modules/platform-addons/, applied in the same
+  `terraform apply` as the cluster itself. Matches this repo's existing precedent for
+  every other platform addon (Karpenter, AWS Load Balancer Controller, ingress-nginx -
+  all Terraform helm_release, not GitOps) and matches the bootcamp reference material's
+  own approach (examples/01-prometheus-operator.tf). The original draft below assumed
+  Argo CD (matching how the calendar app itself is deployed); rejected because Argo CD
+  in this repo is specifically for the app workload, which changes on every CI push and
+  benefits from continuous reconciliation - kube-prometheus-stack doesn't change with
+  app code, it's part of the cluster's baseline the same way Karpenter is.
+- Base step: install kube-prometheus-stack in the cluster to get default cluster/node
+  monitoring, Prometheus, Alertmanager, and Grafana out of the box.
 - Down the road, extend beyond the stack's default monitoring for the app's
   own services:
   - Add ServiceMonitor resources as new templates in the umbrella chart
@@ -652,8 +844,6 @@ STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
   endpoint to the backend (e.g. prom-client for Node/Express) exposing basic
   request/latency/error counters — build it in ahead of time even though
   nothing scrapes it yet.
-
-(Awaiting further detail/confirmation on this step before moving to implementation.)
 
 ============================================================
 STEP 6 — Helm chart hardening + reusable GitHub Actions
