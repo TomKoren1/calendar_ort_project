@@ -3,7 +3,7 @@
 
 image:
   repository: <account-id>.dkr.ecr.<region>.amazonaws.com/calendar-frontend
-  tag: 96cfecfc89483c70aa2edeefe654b7c782d0bf50
+  tag: 34cdb9f63fdb3ab2d3ca6061f4fd161c9dd221de
   pullPolicy: IfNotPresent
 # Empty by default (public/no-registry-auth images). Set when pulling from a
 # private registry the node has no other credentials for - see backend's
