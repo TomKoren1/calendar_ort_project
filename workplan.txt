@@ -845,6 +845,210 @@ Reviewed and clarified before starting any implementation (per project conventio
   request/latency/error counters — build it in ahead of time even though
   nothing scrapes it yet.
 
+5a DONE (2026-07-18) - kube-prometheus-stack base install:
+  - infra/modules/platform-addons/monitoring.tf: new helm_release
+    "kube_prometheus_stack", namespace "monitoring" (create_namespace =
+    true). Bootcamp reference material pinned 57.0.0 - checked actual
+    current via `helm search repo prometheus-community/kube-prometheus-stack
+    --versions`: 87.17.0. No IAM policy/IRSA needed for this addon, unlike
+    Karpenter/the ALB controller above it in this module - Prometheus only
+    talks to the Kubernetes API via its own in-cluster ServiceAccount/RBAC
+    (provisioned by the chart itself), never AWS APIs directly.
+  - Deliberately no PersistentVolumes for Prometheus/Grafana - consistent
+    with this stack's existing ephemeral-by-design posture (RDS skips
+    backups and the final snapshot too, see rds.tf) since the whole
+    environment is destroyed at the end of every working session anyway.
+    Prometheus retention trimmed to 3d (chart default 10d) to match.
+  - serviceMonitorSelectorNilUsesHelmValues/podMonitorSelectorNilUsesHelmValues
+    set false in prometheusSpec - lets Prometheus pick up ServiceMonitor/
+    PodMonitor CRDs anywhere in the cluster, not just ones carrying this
+    Helm release's own label. Needed ahead of time for the next Step 5
+    piece (the app's own ServiceMonitor will live in a different Helm
+    release - the calendar chart, not this one).
+  - Grafana admin password: random_password resource (same pattern as
+    rds.tf's DB password), surfaced via a new sensitive
+    grafana_admin_password output (module -> environment, both dev and
+    staging) rather than the bootcamp reference's hardcoded "changeme".
+  - timeout = 600 on the helm_release (vs the 300s default used elsewhere
+    in this file) - this chart installs far more at once (CRDs, operator,
+    Prometheus, Alertmanager, Grafana, node-exporter DaemonSet,
+    kube-state-metrics) than ingress-nginx or Karpenter do.
+  - Applied for real against the calendar-alt account's already-running
+    dev cluster (same session as Step 4i) - clean on the first try, zero
+    IAM issues (unlike ingress-nginx's two rounds of fixes), all 7 pods
+    Running within ~2 minutes. Real, live confirmation of Karpenter
+    actually doing its job: it provisioned a second node on its own to
+    absorb the extra scheduling load, unprompted. Verified Grafana itself
+    is reachable via `kubectl port-forward` + a curl against /login (HTTP
+    200), and the password output resolves correctly.
+
+5b DONE (2026-07-18) - backend /metrics endpoint (prom-client), ahead of
+   the ServiceMonitor that will scrape it:
+  - backend/package.json: added prom-client (checked actual current via
+    `npm view prom-client version`: 15.1.3, not assumed).
+  - backend/metrics.js: a dedicated Registry (not the global default
+    registry) holding collectDefaultMetrics() (free process/runtime
+    metrics - CPU, memory, event-loop lag, GC - zero extra code) plus two
+    custom metrics, matching the bootcamp's own Counter+Histogram pattern
+    exactly: http_requests_total (Counter) and http_request_duration_seconds
+    (Histogram), both labeled method/route/status_code. One metric type
+    deliberately NOT used: Summary - the bootcamp material's own rule of
+    thumb is prefer Histogram, since Summary's quantiles are computed
+    client-side and can't be aggregated across pods the way Histogram's can.
+  - Real care point, not just following the pattern blindly: labels use
+    req.route.path (the matched Express route pattern, e.g.
+    "/api/events/:id"), never the raw request path - using the raw path
+    would create a new label combination per unique ID and blow up
+    Prometheus's cardinality. req.route is only populated once Express has
+    finished matching, so this has to be read inside a res.on("finish")
+    handler (fires after the response is sent), not in the middleware body
+    up front. Falls back to the literal label "unmatched" for 404s, so
+    scanning/bot traffic against random URLs can't create unbounded label
+    values either.
+  - app.js: metricsMiddleware wired in (times every request via
+    process.hrtime.bigint(), records on "finish"), metricsHandler mounted
+    at GET /metrics (Prometheus's standard convention, not app.get
+    ("/api/metrics", ...) - deliberately outside the /api prefix since
+    Prometheus's ServiceMonitor will scrape the Service directly,
+    in-cluster, bypassing the Ingress entirely, unlike every other backend
+    route which IS reached through the /api Ingress path).
+  - Note: this means CLAUDE.md's Architecture section ("everything the
+    backend serves lives under that prefix, including /api/health") is now
+    slightly stale - /metrics is a deliberate, documented exception, not an
+    oversight, but the doc text itself hasn't been updated to say so yet.
+  - Verified for real, not just "should work": ran the existing test suite
+    unchanged (17/17 still pass - this feature adds a route, touches
+    nothing existing), then started the server against a real local
+    Postgres and curled /metrics directly - confirmed http_requests_total
+    and http_request_duration_seconds_count both appear with correctly
+    matched-route labels for /api/health and /api/users/, and a genuine
+    404 against a nonexistent path correctly falls back to the
+    route="unmatched" label instead of leaking the raw bogus path.
+
+5c DONE (2026-07-18) - backend ServiceMonitor, wiring Prometheus to actually
+   scrape the Step 5b /metrics endpoint:
+  - Homed in charts/backend/templates/servicemonitor.yaml, not a
+    parent-level template - matches the Step 6 precedent of each subchart
+    owning everything about itself (PDB, Ingress, HPA are all subchart-
+    owned already), even though workplan's own wording said "umbrella
+    chart" loosely. Confirmed monitoring.coreos.com/v1 (not v1beta1) is
+    what's actually installed on the live cluster before writing the
+    apiVersion, not assumed.
+  - charts/backend/templates/service.yaml: added `name: http` to the
+    Service's port - ServiceMonitor endpoints should reference a named
+    port, not a raw port number, and the Service had none before this.
+  - ServiceMonitor's spec.selector.matchLabels matches the Service's own
+    metadata.labels (backend.labels - name/instance/component), not the
+    pod selector - a ServiceMonitor selects Services first, then follows
+    each Service's own selector to find pods, a distinction worth being
+    deliberate about rather than copy-pasting the pod selector by habit.
+  - New serviceMonitor.enabled/path/interval values block in
+    charts/backend/values.yaml (default enabled: true) - gated the same
+    way autoscaling already is, and for the same shape of reason: applying
+    a ServiceMonitor with no Prometheus Operator CRDs installed doesn't
+    just sit inert like an HPA with no metrics-server does, it fails
+    outright (the CRD doesn't exist). Added serviceMonitor.enabled: false
+    to both local-dev/values-kind*.yaml alongside the existing
+    autoscaling.enabled: false for the same reason.
+  - Verified via `helm lint` (0 failures) and `helm template` against both
+    value sets: default values render a ServiceMonitor with correctly
+    matched labels/selector/named-port/path; values-kind.yaml renders zero
+    ServiceMonitor objects.
+  - One real, live check against the already-running calendar-alt cluster
+    (not fabricated): confirmed via `kubectl get prometheus -n monitoring
+    -o jsonpath=...` that the live Prometheus CR's serviceMonitorSelector
+    AND serviceMonitorNamespaceSelector are both {} (empty) - i.e. it
+    already watches ServiceMonitors in every namespace with no label
+    restriction, exactly matching what 5a's
+    serviceMonitorSelectorNilUsesHelmValues=false setting was meant to
+    produce, confirmed rather than assumed.
+  - Explicitly NOT verified: an actual live scrape of the real backend's
+    /metrics (Prometheus target showing "up" with real samples). The
+    calendar app itself has never been deployed to this EKS cluster -
+    Argo CD isn't wired to an EKS target yet (only
+    local-dev/values-kind-ecr.yaml against kind, see CLAUDE.md), and the
+    backend's image lives in the ORIGINAL account's ECR, not calendar-
+    alt's, so it isn't pullable there without cross-account repository
+    permissions that don't exist. Deliberately did not fabricate a
+    stand-in pod just to produce a "scrape succeeded" checkmark - that
+    would prove less than it looks like. Real end-to-end scrape
+    verification is deferred to whenever the app itself is actually
+    deployed to a real EKS cluster (a separate, larger, not-yet-done
+    piece), same "not yet applied" honesty this project uses throughout.
+
+4j DONE (2026-07-18) - real terraform destroy of calendar-alt's dev
+   environment, deliberately verified rather than assumed clean:
+  - Motivation: this project's whole dev/staging design assumes `apply ->
+    verify -> destroy` is reliable every session (see infra/environments/
+    README.md) - with a live cluster already up, worth actually proving
+    that before trusting it for real on the primary account later, rather
+    than assuming it from the plan/apply successes alone.
+  - First destroy attempt failed exactly as feared: the ingress-nginx
+    helm_release uninstall hit the same DeleteSecurityGroup:
+    DependencyViolation timeout seen twice during apply (Step 4i/17) - but
+    this time nothing was left alive to retry it (see next point), so it
+    left a REAL orphaned NLB + 2 target groups + 2 security groups in AWS,
+    entirely outside Terraform's state (the ALB controller creates these
+    directly via the AWS API - Terraform never has their IDs). Those
+    orphans then blocked `terraform destroy` on the VPC's public
+    subnets/Internet Gateway (DependencyViolation / "has some mapped
+    public address(es)").
+  - Root cause distinct from every earlier stuck-reconcile incident this
+    session: by the time the uninstall got stuck, the EKS node group had
+    ALREADY been destroyed, so the AWS Load Balancer Controller's own pod
+    was stuck Pending (0/2 then 0/1 nodes available) with nowhere to run -
+    there was no live in-cluster process left that could ever finish the
+    cleanup on its own, unlike the two apply-time incidents where
+    restarting the controller pod was enough.
+  - Fixed by hand, in order: `aws elbv2 delete-load-balancer` (confirmed
+    ARN first via describe-load-balancers), then `delete-target-group` x2,
+    then `delete-security-group` on both ALB-controller-managed SGs
+    (checking `describe-network-interfaces --filters Name=group-id,...`
+    showed zero dependents on each before deleting) - not `-target` or
+    state manipulation, since these resources were never in Terraform's
+    state to begin with.
+  - Retried `terraform destroy` - got further, but stalled again on the
+    node/cluster security groups and a private subnet. Root cause #2,
+    genuinely different again: a live, `running` EC2 instance
+    (i-0103e823b3c16f9ac, tagged karpenter.sh/nodepool=general-purpose) -
+    the second node Karpenter provisioned during Step 5a's kube-
+    prometheus-stack install, entirely outside Terraform's state (Karpenter
+    creates EC2 instances directly, not through Terraform), orphaned the
+    same way the NLB was once Karpenter's own controller was destroyed
+    before it could clean up its own node. Fixed with `aws ec2
+    terminate-instances`.
+  - Retried again - VPC itself then stalled ~10min with two more leftover,
+    non-Terraform-managed security groups: the same ALB-controller SG
+    pattern recurring (a second `k8s-traffic-...` SG, from the same
+    ingress-nginx reinstall cycle logged in Step 4i/17) AND an
+    EKS-auto-created "cluster security group" (eks-cluster-sg-calendar-
+    dev-...) that AWS itself provisions alongside the cluster and normally
+    auto-deletes when the cluster does, but hadn't yet. Deleted both by
+    hand once confirmed zero ENI dependents on each; the VPC delete (which
+    the AWS provider retries internally on DependencyViolation) then
+    succeeded on its own next retry without needing to restart Terraform.
+  - Real, load-bearing conclusion for this project's core dev/staging
+    design: `terraform destroy` alone is NOT reliably clean for this
+    stack as built - three separate categories of out-of-band AWS
+    resource (ALB-controller-created LB/SGs, Karpenter-created EC2
+    instances, EKS-auto-created cluster SG) can all outlive the
+    Terraform-managed resources they depend on if a controller's own pod
+    loses its compute mid-cleanup, and none of them are visible to
+    `terraform state list` to explain why a destroy is stuck. Documented
+    here rather than silently worked around, since every future
+    `apply`/`destroy` cycle on dev or staging should expect this same
+    failure mode is possible, not assume this session's manual fixes were
+    a one-off.
+  - Verified via a full post-destroy AWS sweep (not just `terraform state
+    list` showing 0, which only proves Terraform's own bookkeeping):
+    describe-vpcs (only the account's own default VPC left),
+    describe-instances (none), describe-db-instances (none),
+    elbv2 describe-load-balancers (none), eks list-clusters (none).
+  - infra/environments/dev/versions.tf's backend bucket reverted back to
+    the primary account (672299759593) now that calendar-alt testing for
+    this session is done, matching the same TEMP-then-revert pattern used
+    earlier in Step 4i.
+
 ============================================================
 STEP 6 — Helm chart hardening + reusable GitHub Actions
 ============================================================

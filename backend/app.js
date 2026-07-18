@@ -4,11 +4,13 @@ import usersRouter from "./routes/users.js";
 import eventsRouter from "./routes/events.js";
 import calendarsRouter from "./routes/calendars.js";
 import tagsRouter from "./routes/tags.js";
+import { metricsMiddleware, metricsHandler } from "./metrics.js";
 
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use(metricsMiddleware);
 
 app.use("/api/users", usersRouter);
 app.use("/api/events", eventsRouter);
@@ -16,6 +18,7 @@ app.use("/api/calendars", calendarsRouter);
 app.use("/api/tags", tagsRouter);
 
 app.get("/api/health", (req, res) => res.json({ ok: true }));
+app.get("/metrics", metricsHandler);
 
 app.use((err, req, res, next) => {
   if (err.code === "23503") {

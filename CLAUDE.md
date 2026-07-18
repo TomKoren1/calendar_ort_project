@@ -108,8 +108,11 @@ full kind workflow).
   CalendarGrid/EventModal/Sidebar, `dateUtils.js` has month-grid date math.
 - Frontend talks to the backend via a relative `/api` path. As of Step 6, this is routed at the
   **Ingress** level — the backend subchart owns an `Ingress` matching `/api` (everything the
-  backend serves lives under that prefix, including `/api/health`), the frontend subchart owns
-  a separate `Ingress` matching `/`, and `ingress-nginx` merges both into one routing table.
+  backend serves to the *frontend* lives under that prefix, including `/api/health`), the
+  frontend subchart owns a separate `Ingress` matching `/`, and `ingress-nginx` merges both into
+  one routing table. The one deliberate exception is `/metrics` (Step 5) — outside `/api` since
+  it's scraped by Prometheus directly from the Service, in-cluster, and never goes through the
+  Ingress at all.
   `frontend/nginx.conf` no longer proxies `/api/*` itself (it did before Step 6) — it only serves
   static assets and the SPA fallback now. There is still no hardcoded backend host baked into the
   frontend build; the browser calls the same relative `/api` path either way.

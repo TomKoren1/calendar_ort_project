@@ -1,0 +1,23 @@
+{{- if .Values.serviceMonitor.enabled }}
+# Requires the Prometheus Operator CRDs (infra/modules/platform-addons/
+# monitoring.tf, Step 5a) - disabled for local-dev/values-kind*.yaml, which
+# has no kube-prometheus-stack installed, same class of dependency as HPA's
+# metrics-server requirement above.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "calendar.backend.fullname" . }}
+  labels:
+    {{- include "backend.labels" . | nindent 4 }}
+spec:
+  # Matches this Service's own metadata.labels (service.yaml), not the pod
+  # selector - a ServiceMonitor selects Services, then follows each
+  # Service's own selector to find the pods to scrape.
+  selector:
+    matchLabels:
+      {{- include "backend.labels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: {{ .Values.serviceMonitor.path }}
+      interval: {{ .Values.serviceMonitor.interval }}
+{{- end }}

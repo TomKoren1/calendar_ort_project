@@ -39,6 +39,13 @@ autoscaling:
   minReplicas: 2
   maxReplicas: 5
   targetCPUUtilizationPercentage: 75
+# Requires the Prometheus Operator CRDs (infra/modules/platform-addons/monitoring.tf,
+# Step 5a) - disabled for local-dev/values-kind*.yaml, which has no kube-prometheus-stack
+# installed. Scrapes backend/metrics.js's GET /metrics endpoint (Step 5b).
+serviceMonitor:
+  enabled: true
+  path: /metrics
+  interval: 30s
 env:
   PORT: "3001"
 # Secret must already exist in the cluster (created by hand, Terraform, or

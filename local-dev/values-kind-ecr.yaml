@@ -24,6 +24,10 @@ backend:
   # kind has no metrics-server installed - HPA would just show <unknown> forever.
   autoscaling:
     enabled: false
+  # kind has no Prometheus Operator CRDs installed - applying a ServiceMonitor
+  # would fail outright (CRD doesn't exist), not just sit inert like the HPA does.
+  serviceMonitor:
+    enabled: false
 
 frontend:
   image:
