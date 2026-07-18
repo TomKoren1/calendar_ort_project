@@ -1258,3 +1258,64 @@ chart to see the HPA/PDB/Ingress/ConfigMap all work together against a real
 cluster) still pending - everything here has been verified via
 `helm lint`/`helm template`/YAML parsing only, consistent with how this
 project treats "not yet applied" work throughout.
+
+============================================================
+STEP 7 — Deploy the calendar app to real EKS via Argo CD
+============================================================
+Not yet started - planned here first, per project convention, before touching any code.
+
+Why this is the actual next priority, decided with the user (2026-07-18): Steps 4, 5, and 6 are all
+individually code-complete and validated (terraform plan/helm lint/helm template), but none of them
+has ever been proven end-to-end against a real, live app running on real EKS - only cluster/platform
+pieces have been live-verified (Step 4i/4j's calendar-alt session, Step 5's Prometheus/Grafana). The
+calendar app itself has only ever run via Argo CD against `kind`. This step closes that gap: it's
+what would let the HPA/PDB/Ingress/ConfigMap split (Step 6), the ServiceMonitor's actual scrape
+(Step 5c), and the whole environment design (Step 4g) all be verified together, against something
+real, instead of each being separately "should work."
+
+What's actually needed, worked out but not yet built:
+
+1. Argo CD itself has to be installed on the EKS cluster - it currently only runs on `kind`. The
+   ApplicationSet's `destination.server: https://kubernetes.default.svc` (argocd/applications/
+   calendar-appset.yaml) means Argo CD deploys to whatever cluster it's itself running on, not an
+   externally-registered one - so this isn't optional plumbing, it's a real prerequisite. Revisit
+   the same install gotchas hit the first time (feedback_argocd_install_gotchas: --server-side apply
+   for the large CRD, a bcrypt-hashed admin.password, never plaintext).
+
+2. A new values file for the real-EKS target - `local-dev/values-kind-ecr.yaml` is kind-specific by
+   name and content (ingress.enabled: false, autoscaling.enabled: false, ECR pull secret) so a new
+   file is needed, not a reused one. Real EKS should instead leave ingress/autoscaling/serviceMonitor
+   at their chart defaults (all enabled) and only override what's genuinely environment-specific:
+   image repository/tag (already defaulted correctly by CI's tag-bump step - see Step 3), and the
+   Ingress hostname/class to match whatever ingress-nginx's NLB actually resolves to for that
+   environment (no owned domain - same "reached directly via the NLB's own AWS-generated hostname"
+   decision already made for ingress-nginx itself, see infra/modules/platform-addons/ingress-
+   nginx.tf's comment).
+
+3. A new `elements` entry in calendar-appset.yaml's List generator - the ApplicationSet was
+   deliberately shaped for exactly this ("what makes adding a real staging/prod entry later a
+   one-line addition instead of copy-pasting a whole new Application," see that file's own comment)
+   back in Step 3.
+
+4. Confirm `backend.existingSecret: calendar-db-credentials` (the chart's default) actually matches
+   what infra/modules/platform-addons/rds.tf's kubernetes_secret creates - it should already, by
+   design (see that file's own comment), but worth confirming live rather than assuming, same
+   standard this project holds everything else to.
+
+5. A real blocker to solve, not yet solved: whichever account this targets, the backend/frontend
+   images need to actually be pullable there. The ECR repos (infra/bootstrap/) live in the PRIMARY
+   account (672299759593). If this step ends up targeting calendar-alt again (or any other
+   non-primary account) the way Step 4i/4j did, that's the same cross-account ECR problem already
+   hit and deliberately not solved in Step 5c ("the backend's image lives in the ORIGINAL account's
+   ECR... isn't pullable there without cross-account repository permissions that don't exist") -
+   needs an actual decision here (cross-account ECR repository policy vs. building/pushing to a
+   second ECR repo in that account vs. waiting for the primary account's NLB restriction to lift and
+   targeting it directly), not another deferral.
+
+Explicitly deferred, decided WITH the user (2026-07-18): no cluster is currently running on either
+account (calendar-alt was destroyed in Step 4j to stop the cost clock; the primary account's NLB
+restriction from Step 4h/4i was never rechecked this session). Rather than default to re-provisioning
+calendar-alt again or picking an account unprompted, this step's code (Argo CD bootstrap values, the
+new environment values file, the ApplicationSet entry) will be written and validated the same
+plan/template-only way Step 4f originally was - real end-to-end verification (and the account/ECR
+decision in point 5 above) picked up in a future session once a cluster is actually up again.
