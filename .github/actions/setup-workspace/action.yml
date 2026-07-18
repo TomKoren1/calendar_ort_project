@@ -1,0 +1,22 @@
+name: Setup workspace
+description: >
+  Install npm workspace dependencies (Node setup + `npm ci`). Shared by
+  backend-ci.yml and frontend-ci.yml's first job - both need the exact same
+  opening before diverging into their own test/lint/build steps. Does NOT
+  check out the repo itself - a local-path composite action (uses: ./path)
+  can only be resolved by the runner AFTER checkout has already happened,
+  so the caller must run actions/checkout@v4 itself before this step, not
+  the other way around.
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: package-lock.json
+
+    - name: Install dependencies (npm workspaces - backend + frontend)
+      shell: bash
+      run: npm ci

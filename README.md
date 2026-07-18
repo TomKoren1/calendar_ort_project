@@ -198,3 +198,53 @@ Terraform in `infra/bootstrap/` — see that folder's README. The workflows refe
 and AWS region via GitHub Actions repository **Variables** (`AWS_GITHUB_ACTIONS_ROLE_ARN`,
 `AWS_REGION`) rather than hardcoding them, since neither value is secret but both are
 repo/account-specific.
+
+## Observability (Prometheus + Grafana)
+
+**kube-prometheus-stack** — Prometheus, Alertmanager, Grafana, node-exporter, and
+kube-state-metrics, bundled as one Helm chart — is installed via Terraform
+(`infra/modules/platform-addons/monitoring.tf`), in the same `terraform apply` as the EKS cluster
+itself, not via Argo CD. This deliberately matches how every other platform addon in this repo is
+installed (Karpenter, the AWS Load Balancer Controller, ingress-nginx): Argo CD is reserved for the
+app workload, which changes on every CI push and benefits from continuous reconciliation.
+kube-prometheus-stack doesn't change with app code — it's part of the cluster's baseline, the same
+way Karpenter is.
+
+No IAM policy or IRSA role is needed for this addon, unlike the others — Prometheus only talks to
+the Kubernetes API (via its own in-cluster ServiceAccount/RBAC), never AWS APIs directly.
+
+Prometheus and Grafana have no PersistentVolumes — a deliberate choice, consistent with this
+project's ephemeral-by-design posture for `infra/environments/{dev,staging}` (RDS skips backups and
+the final snapshot for the same reason): the whole environment is destroyed at the end of every
+working session, so metrics/dashboards don't need to survive it. Prometheus's retention is trimmed
+to 3 days accordingly (the chart's own default is 10).
+
+```bash
+# Grafana UI (admin / see `terraform output -raw grafana_admin_password` in infra/environments/<env>/)
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-grafana 3000:80
+# open http://localhost:3000
+
+# Prometheus UI
+kubectl port-forward -n monitoring svc/kube-prometheus-stack-prometheus 9090:9090
+# open http://localhost:9090
+```
+
+### Scraping the backend
+
+The backend exposes Prometheus-format metrics at `GET /metrics` (`backend/metrics.js`, via
+`prom-client`): free process-level metrics (CPU, memory, event-loop lag, GC) plus two custom
+metrics — `http_requests_total` and `http_request_duration_seconds`, both labeled
+`method`/`route`/`status_code`. The `route` label always uses the *matched Express route pattern*
+(e.g. `/api/events/:id`), never the raw request path — using the raw path would create a new label
+value per unique ID and blow up Prometheus's cardinality; unmatched requests (404s) fall back to the
+literal label `unmatched` for the same reason. `/metrics` is deliberately outside the `/api` prefix
+that the rest of the backend lives under — it's scraped by Prometheus directly from the Kubernetes
+Service, in-cluster, and never goes through the Ingress at all.
+
+A `ServiceMonitor` (`helm/calendar/charts/backend/templates/servicemonitor.yaml`, gated by
+`backend.serviceMonitor.enabled`) tells Prometheus to actually scrape it — matched by the backend
+Service's own labels (a `ServiceMonitor` selects Services, then follows each Service's own selector
+to find pods), scraping the named `http` port at `/metrics` every 30s. Disabled in
+`local-dev/values-kind*.yaml`, since a local kind cluster has no Prometheus Operator CRDs installed
+— applying a `ServiceMonitor` there would fail outright (the CRD doesn't exist), not just sit inert
+the way an `HorizontalPodAutoscaler` does without `metrics-server`.

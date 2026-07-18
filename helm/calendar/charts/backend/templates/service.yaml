@@ -9,5 +9,6 @@ spec:
     app.kubernetes.io/name: backend
     app.kubernetes.io/component: backend
   ports:
-    - port: {{ .Values.service.port }}
+    - name: http
+      port: {{ .Values.service.port }}
       targetPort: {{ .Values.containerPort }}

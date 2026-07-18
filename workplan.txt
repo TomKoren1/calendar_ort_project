@@ -334,14 +334,504 @@ STEP 4 — Terraform: VPC, EKS, cluster add-ons, RDS
   privilege IAM (ties into Step 1's GitHub OIDC role and the ALB
   controller/CSI/autoscaler each needing their own scoped IAM roles via IRSA).
 
-(Awaiting further detail/confirmation on this step before moving to implementation.)
+Decisions made (2026-07-08):
+  - Cost is the dominant constraint here, unlike every step before it: an
+    always-on EKS+RDS+NAT setup runs ~$150-300+/month, vs Step 1c's
+    essentially-free IAM/ECR bootstrap. User wants to apply-and-destroy every
+    working session to minimize spend, not leave this running.
+  - That workflow requires state to survive the destroy/apply cycle, so this
+    splits into infra/state-backend/ (tiny, permanent, applied once, never
+    destroyed - S3 bucket + DynamoDB lock table) and infra/main/ (the actual
+    expensive VPC/EKS/Karpenter/RDS stack, meant to be destroyed regularly).
+  - Karpenter over Cluster Autoscaler - bootcamp material's own framing as
+    the modern AWS-native approach.
+  - Cost-optimized (not textbook-HA) sizing, explicitly agreed given the
+    apply/destroy workflow: single NAT gateway (not per-AZ), single-AZ RDS
+    (not Multi-AZ), small/spot Karpenter instances.
+  - RDS data is ephemeral by design (won't survive a destroy) - acceptable,
+    matches how kind's local Postgres is already treated.
+
+4a DONE (2026-07-08) - infra/state-backend/:
+  - S3 bucket calendar-terraform-state-672299759593 (versioned, AES256
+    encrypted, fully public-access-blocked, TLS-only bucket policy) +
+    DynamoDB table calendar-terraform-locks (PAY_PER_REQUEST, no idle cost).
+  - Both resources carry `lifecycle { prevent_destroy = true }` - a real
+    guard against accidentally destroying the ONE thing in this whole
+    project that must never be destroyed, given the apply/destroy-every-
+    session workflow everything else in this step is about to use.
+  - Local state for this module itself (same bootstrap chicken-and-egg
+    reasoning as infra/bootstrap/ - can't depend on a remote backend it's
+    the one creating).
+  - Plan reviewed (6 to add, 0 to change, 0 to destroy) and applied cleanly.
+
+4b DONE (2026-07-08) - infra/main/ VPC:
+  - versions.tf: real remote backend (infra/state-backend/'s bucket/table),
+    unlike every other Terraform stack in this project so far (all local
+    state for bootstrap reasons). Noted a real Terraform behavior change hit
+    on init: `dynamodb_table` in the S3 backend block is now deprecated in
+    favor of native `use_lockfile` locking - kept DynamoDB anyway since
+    that's what the workplan and bootcamp material both explicitly teach,
+    and it's still fully functional (deprecated, not removed).
+  - terraform-aws-modules/vpc, 2 AZs, single NAT gateway (cost-optimized
+    choice, confirmed in the plan: exactly one NAT gateway + EIP created,
+    not one per AZ). Public subnets tagged kubernetes.io/role/elb=1,
+    private subnets tagged kubernetes.io/role/internal-elb=1 AND
+    karpenter.sh/discovery=calendar-eks - set now even though EKS/Karpenter
+    are later pieces, so auto-discovery isn't retrofitted.
+  - Plan reviewed (19 to add, 0 to change, 0 to destroy) and applied cleanly.
+    vpc_id=vpc-0d756381edabbc82b, 2 public + 2 private subnets across
+    us-east-1a/us-east-1b.
+
+4c DONE (2026-07-08) - infra/main/ EKS cluster:
+  - terraform-aws-modules/eks, control plane + 4 managed addons (coredns,
+    kube-proxy, vpc-cni, eks-pod-identity-agent). cluster_creator gets
+    cluster-admin automatically (enable_cluster_creator_admin_permissions).
+    Cluster's own OIDC provider created (needed for Karpenter/ALB-controller
+    IRSA, next pieces) - same mechanism as Step 1c's GitHub OIDC, different
+    issuer. Real version-drift hit: this module version (~>20.0 resolves to
+    20.37.2) removed `manage_aws_auth_configmap`, present in the bootcamp
+    reference stack's older version - dropped it, authentication_mode +
+    enable_cluster_creator_admin_permissions alone are enough via the newer
+    EKS Access Entries API.
+  - Original plan was zero EKS managed node groups at all - Karpenter
+    provisioning 100% of compute, with just a small Fargate profile for
+    Karpenter's own controller pods (matching the bootcamp reference stack).
+    REAL CORRECTION after the first apply attempt failed: kube-proxy and
+    vpc-cni are DaemonSets, which cannot run on Fargate at all (AWS platform
+    limitation) - and the coredns addon timed out after a full 20 minutes
+    stuck DEGRADED, because its pods had zero compute to schedule onto
+    (confirmed directly: `kubectl get nodes` showed nothing, coredns pods
+    Pending). Fixed with a tiny, fixed EKS managed node group (1x t3.small,
+    ON_DEMAND) dedicated to core system pods, separate from Karpenter which
+    still handles all actual application workload scaling. Re-apply: node
+    group up in 2m, and coredns (Terraform correctly marked it "tainted" and
+    destroyed+recreated it) went healthy in 16s once real compute existed -
+    confirmed via kubectl: 1 node Ready, every kube-system pod Running.
+  - Also hit and fixed live: I used the wrong VPC module output attribute
+    name (module.vpc.private_subnet_ids, which is this repo's OWN output
+    name, not the module's actual attribute module.vpc.private_subnets) -
+    caught immediately by `terraform validate`.
+
+4d DONE (2026-07-08) - Karpenter, real four-part debugging saga:
+  - Added helm + kubectl (alekc/kubectl) providers, both authenticating
+    against this same-apply-created cluster via data.aws_eks_cluster_auth -
+    no static credential, same pattern as the AWS-side IRSA mechanisms
+    already used throughout this project.
+  - module.karpenter (terraform-aws-modules/eks/aws//modules/karpenter) for
+    IRSA controller role + node role; ONE simplified NodePool
+    (general-purpose: spot-first, small t-family instances only) instead of
+    the bootcamp reference stack's four specialized pools - this app has no
+    exotic compute needs and system pods already have their own node group.
+  - Issue 1: EC2NodeClass rejected with "amiSelectorTerms: Required value" -
+    Karpenter's v1 API requires it explicitly (v1beta1 let amiFamily alone
+    implicitly resolve an AMI). Fixed: amiSelectorTerms = [{ alias =
+    "al2023@latest" }].
+  - Issue 2: Karpenter's controller pod (on a Fargate profile, matching the
+    reference stack) crash-looped - DNS lookups for
+    sts.us-east-1.amazonaws.com consistently timed out, a real Fargate
+    networking problem (security groups checked out fine, ruled out as the
+    cause). Fixed by removing the Fargate profile entirely and letting the
+    controller schedule onto the existing "system" EKS managed node group
+    instead, which already has proven-working networking. Learned along the
+    way: an EKS Fargate profile *claims* every pod in a matching namespace
+    for Fargate scheduling - no opt-out while the profile exists, so it had
+    to be removed, not just supplemented.
+  - Issue 3: once scheduled on a real node, the controller panicked instead -
+    "karpenter version is not compatible with K8s version 1.36". The pinned
+    chart version 1.1.1 (matching the bootcamp reference stack) predates
+    this cluster's K8s version. Fixed by checking the actual latest
+    available chart directly (`helm show chart
+    oci://public.ecr.aws/karpenter/karpenter`) and pinning to 1.13.0 instead -
+    also learned omitting `version` on an existing helm_release does NOT
+    force an upgrade to latest, it just leaves the currently-installed
+    version alone.
+  - Issue 4: with 1.13.0 running, real ERROR-level reconciler logs -
+    "no subnets found" and an explicit iam:ListInstanceProfiles AccessDenied.
+    The module's auto-generated controller IAM policy was incomplete for
+    this Karpenter version. Fixed by adding the standard extra controller
+    policy (EC2 describe actions, SSM/pricing reads, instance-profile
+    management, PassRole, eks:DescribeCluster) the bootcamp reference stack
+    also attaches alongside the module's base policy - kept broad rather
+    than resource-tag-scoped, a deliberate least-privilege trade-off for a
+    learning project where "working correctly" mattered more here.
+  - Final verified state: karpenter pod 1/1 Running, 0 restarts;
+    EC2NodeClass and NodePool both status Ready=True (checked via
+    `kubectl get ec2nodeclass/nodepool -o jsonpath='{.status.conditions}'`,
+    not just "pod is running").
+
+4e IN PROGRESS (blocked on AWS account verification, 2026-07-08) - AWS Load
+   Balancer Controller + ingress-nginx (NLB, not ALB):
+  - Switched the ingress design from a plain ALB Ingress to NLB (Layer 4) +
+    ingress-nginx (in-cluster Layer 7) - decided after discussing the real
+    trade-off: NLB preserves real client source IPs (ALB doesn't, by
+    default), ingress-nginx has a much richer feature set than raw ALB
+    Ingress annotations, and this keeps helm/calendar/templates/ingress.yaml
+    portable (plain ingressClassName: nginx, no AWS-specific annotations
+    baked into the app chart itself) vs. locking it to EKS. The AWS Load
+    Balancer Controller is still required even for this NLB path - it's what
+    actually understands the aws-load-balancer-* Service annotations for
+    IP-target-mode NLBs (the legacy in-tree cloud provider can only do
+    "instance" target mode, which is fragile against Karpenter dynamically
+    creating/destroying nodes).
+  - helm/calendar/templates/ingress.yaml reworked: host and annotations both
+    now optional (only rendered if set) since this project has no owned
+    domain - reached via the NLB's own AWS-generated hostname, not a real
+    domain, so no TLS either. helm/calendar/values.yaml ingress.className
+    changed from alb to nginx to match.
+  - Copied the "official" AWS Load Balancer Controller IAM policy from the
+    bootcamp reference material into infra/main/ingress-nginx.tf as a
+    starting point - it needed two real, live-debugged corrections, both
+    now fixed (same "reference material is version-drifted" pattern hit
+    repeatedly in 4c/4d):
+    - Issue 1: AccessDenied on elasticloadbalancing:AddTags immediately
+      after the controller created a target group. The copied statement had
+      a strict conditional (only allows AddTags once a resource is ALREADY
+      tagged as cluster-owned) that doesn't hold at the moment of resource
+      creation with this controller version (3.4.1). Fixed by simplifying
+      to an unconditional Allow on the specific target-group/load-balancer
+      ARNs - a deliberate least-privilege trade-off, not a full revert to
+      wildcard-everything.
+    - Issue 2: separately, ec2:DeleteSecurityGroup was missing from the
+      policy ENTIRELY (not just over-conditioned) - only surfaced once the
+      controller tried to clean up the security group it had created, during
+      an uninstall/replace. This left a real orphaned Kubernetes Service
+      object stuck with a `service.k8s.aws/resources` finalizer that could
+      only be cleared once the permission existed AND the controller pod was
+      manually restarted (`kubectl delete pod ...`) to force an immediate
+      reconcile instead of waiting out its retry backoff - the fix alone,
+      without the restart, would not have unstuck the already-orphaned
+      Service on its own.
+  - After both real bugs were fixed, hit a genuinely different, unrelated
+    error: `OperationNotPermitted: This AWS account currently does not
+    support creating load balancers. ... contact AWS Support` on
+    CreateLoadBalancer - confirmed via `aws elbv2 describe-load-balancers`
+    returning zero existing LBs (ruled out a quota-from-existing-resources
+    explanation). Root cause identified: this is a brand-new AWS account,
+    confirmed via the Cost Management console's first-time "check back in
+    24 hours" message - AWS gates ELB/NLB/ALB creation behind an automated
+    new-account verification window (commonly 24-48h) that isn't visible or
+    fixable via the API/Terraform/IAM at all; a payment method was already
+    on file, and no Budget Action/SCP was involved (ruled both out - the
+    error text itself is ELB-service-specific, not an IAM/SCP-style
+    AccessDenied). Nothing left to fix in code - infra/main/ingress-nginx.tf
+    is believed correct and ready to re-apply once the account restriction
+    clears.
+  - Session ended with `terraform destroy` of the whole infra/main/ stack
+    (cost control, as agreed for every session) rather than leaving it
+    running idle while blocked on an external account-verification wait.
+
+4f IN PROGRESS (code written + validated, not yet applied, 2026-07-08) -
+   RDS Postgres:
+  - infra/main/rds.tf: terraform-aws-modules/rds/aws, single-AZ db.t4g.micro
+    (smallest current-gen/Graviton burstable class), gp3/20GB,
+    storage_encrypted = true, publicly_accessible = false. Security group
+    allows Postgres (5432) only from module.eks.node_security_group_id -
+    confirmed this is the SAME shared SG used by both the fixed "system"
+    node group AND Karpenter-launched app nodes (Karpenter's EC2NodeClass
+    selects security groups by the karpenter.sh/discovery tag, which was
+    applied onto this exact SG back in eks.tf), so one ingress rule covers
+    both without a second SG.
+  - Ephemeral by design, matching the rest of this stack: backup_retention_
+    period = 0, skip_final_snapshot = true, deletion_protection = false -
+    RDS data does not survive a destroy/recreate cycle (accepted trade-off).
+  - Credentials decision (discussed at length before writing any code): a
+    random_password is written DIRECTLY into the Kubernetes Secret the
+    backend chart already expects (calendar-db-credentials /
+    DATABASE_URL - see helm/calendar/charts/backend/values.yaml), explicitly
+    WITHOUT AWS Secrets Manager. Reasoning: Secrets Manager's real value
+    (rotation reaching the running app, multi-consumer sharing, audit
+    trail) needs something to actually sync it into the cluster (External
+    Secrets Operator), which doesn't exist in this project yet - standing
+    up Secrets Manager alone today would just be Terraform writing the
+    password there and immediately reading it back out to populate this
+    same Kubernetes Secret, no operational benefit, plus ongoing cost, for
+    a stack destroyed every session. Discussed two concrete future features
+    (a calendar-sync proxy for Google/Apple/Microsoft, and an AI scheduling
+    assistant) - concluded the AI integration's future API key IS a good
+    Secrets Manager fit (single static app secret, same shape as this DB
+    password), but the calendar proxy's OAuth tokens are NOT (those are
+    per-user application data belonging in the database itself, not
+    infra-secrets - Secrets Manager cost scales per-secret, wrong shape for
+    per-user tokens).
+    FLAGGED FUTURE STEP: add AWS Secrets Manager + External Secrets
+    Operator once the AI-integration work introduces its first real static
+    app secret - migrate this RDS password into it at the same time, since
+    by then it's a small mechanical change, not a rearchitecture.
+  - Added `random` and `kubernetes` providers (versions.tf/provider.tf) -
+    kubernetes provider uses the same same-apply-cluster auth pattern as
+    helm/kubectl (data.aws_eks_cluster_auth token, no static credential).
+  - Real module-version issue hit and fixed before ever applying: the
+    bootcamp reference pins terraform-aws-modules/rds/aws ~> 6.0; checked
+    actual latest via the registry API directly (7.2.0), but 7.x requires
+    AWS provider >= 6.28 - a major-version jump from this project's
+    existing `~> 5.0` pin (shared by vpc/eks/karpenter) not worth forcing
+    just for RDS. Settled on ~> 6.0 (resolves 6.13.1), which only needs AWS
+    provider >= 5.36, already satisfied.
+  - Second real issue, caught in a targeted plan before applying: even in
+    v6.13.1, the module defaults `manage_master_user_password = true` (RDS
+    natively managing the password in ITS OWN Secrets Manager secret) -
+    this SILENTLY IGNORES the plain `password` argument entirely unless
+    manage_master_user_password is explicitly set to false. First targeted
+    plan showed `manage_master_user_password = true` and no `password` in
+    the diff at all despite it being set in the config - caught by
+    inspecting the plan output, not by an error. Fixed by explicitly adding
+    manage_master_user_password = false.
+  - Real, structural issue hit trying to `terraform plan` the whole stack
+    from the fully-destroyed state left at the end of 4e: a plain
+    untargeted plan fails outright (`invalid provider configuration` on the
+    kubectl provider) because provider.tf's helm/kubectl/kubernetes blocks
+    all depend on module.eks's outputs, which cannot be "known after apply"
+    for a provider block the way a normal resource argument can - this only
+    ever worked before because each piece (VPC, EKS, Karpenter, ALB
+    controller, and now RDS) was applied as its own separate `terraform
+    apply`, so module.eks was always already concrete in state by the time
+    a helm/kubectl/kubernetes-using piece was added. Conclusion: a full
+    re-apply from fully-empty state needs to be PHASED (VPC+EKS first via
+    -target, then everything else in a second apply), not one single
+    `terraform apply` - saved as its own memory entry since this will
+    matter every session from now on.
+
+4f DONE (2026-07-09) - phased re-apply confirmed the RDS design correct:
+  - Phase 1 (`terraform apply -target module.vpc -target module.eks`): 59
+    resources, clean, ~14 min (mostly the EKS control plane itself).
+  - Phase 2 (untargeted apply for everything else): Karpenter, ALB
+    controller IAM/Helm, and RDS all came up cleanly with ZERO further code
+    changes needed - real confirmation that the 4e/4f fixes made yesterday
+    (AddTags/DeleteSecurityGroup IAM gaps, manage_master_user_password) were
+    genuinely correct, not one-off luck. RDS instance reached `available` in
+    6m34s; `calendar-db-credentials` Secret verified in-cluster with a
+    working `postgresql://calendar:***@calendar-eks-db...:5432/calendar`
+    DATABASE_URL.
+  - ingress_nginx/NLB STILL blocked by the exact same AWS account
+    restriction as 4e, even after adding a payment method - confirmed via
+    ALB controller logs showing the identical `OperationNotPermitted`
+    message. This has now persisted past the original "24-48h" estimate,
+    so decided to stop guessing and have the user open a real AWS Support
+    case (Account and billing support, free tier) instead of continuing to
+    retry blind.
+  - Destroy (session end) hit the exact same two-part failure as 4e's
+    teardown: (1) `helm_release.ingress_nginx` uninstall hung on the
+    Service's `service.k8s.aws/resources` finalizer once the NAT gateway
+    was destroyed out from under the ALB controller pod - force-cleared via
+    `kubectl patch svc ... --type=merge` with empty finalizers (safe, no
+    real NLB ever existed); (2) two ALB-controller-created security groups
+    (`k8s-traffic-*`, `k8s-ingressn-*`) were left behind, invisible to
+    Terraform state, blocking `aws_vpc` deletion - found via
+    `aws ec2 describe-security-groups --filters Name=vpc-id,...` and
+    deleted by hand before resuming `terraform destroy`. Confirms this
+    isn't a one-off - it's the reliable failure mode whenever ingress_nginx
+    never got a real NLB and the stack gets destroyed anyway; already
+    covered by [[feedback_alb_controller_orphaned_sg_blocks_vpc_destroy]],
+    this run just re-validated the same playbook works cleanly the second
+    time. Final state confirmed fully clean: empty terraform state, no
+    VPC/EKS/RDS resources left in AWS.
+
+NEXT: once the AWS Support case resolves (or the account restriction is
+otherwise confirmed clear), phased re-apply again (VPC+EKS, then
+everything else) and this time expect ingress_nginx to succeed on the
+first try - no further code changes anticipated for 4e. After that,
+Step 4 (VPC/EKS/Karpenter/ingress/RDS) is fully complete; move to
+deploying the actual calendar app onto this real cluster via Argo CD
+(currently only points at kind), then Step 5.
+
+4g DONE (2026-07-15) - split infra/main into modules + dev/staging
+   environments:
+  - Prompted by feedback from the user's course teacher (notes/to-do): show
+    environment separation "at the variable level and folder level", and
+    confirm module usage matches best practice. Reviewed against
+    C:\devops\Study_ort\all_study\bootCamp\05-terraform (07-project-structure,
+    11-modules-and-reusability) and 06-terragrunt before touching any code -
+    module usage was already correct (registry modules throughout, no
+    wrapper-with-no-value-add anti-pattern); the real gap was that infra/main
+    was a single flat stack with hardcoded variable defaults and no
+    terraform.tfvars, which matches the bootcamp's own guidance for a
+    genuinely single-environment project but doesn't demonstrate the
+    Example-02/03 folder+variable pattern being asked for.
+  - Decided WITH the user (not just for the teacher's sake) to stand up a
+    second, real "staging" environment rather than a never-applied
+    demonstration folder - justified because this whole stack is already
+    applied-and-destroyed every session, so a second environment costs
+    little extra as long as dev and staging are never run simultaneously.
+  - infra/main/ split into infra/modules/eks-cluster/ (vpc.tf + eks.tf,
+    unchanged logic, cluster_name/vpc_cidr/azs as inputs) and
+    infra/modules/platform-addons/ (karpenter.tf + ingress-nginx.tf +
+    rds.tf, cluster identity/network values passed in as plain input
+    variables from the caller - not terraform_remote_state, since both
+    modules are called from the same root in the same apply).
+  - Real, deliberate reason it's TWO modules, not one: provider.tf's
+    helm/kubectl/kubernetes blocks depend on module.eks's own outputs (this
+    is why 4f needed a phased -target apply in the first place). Terraform
+    provider blocks must live in the calling root, not inside a module, so
+    bundling karpenter/ingress-nginx (which need those providers) into the
+    SAME module as vpc/eks would make the whole module unplannable in one
+    pass with no way to target just the cluster part first. Splitting
+    preserves the exact same phased-apply shape 4f already proved out, just
+    packaged for reuse across environments.
+  - infra/environments/dev/ and infra/environments/staging/ added - each a
+    thin caller (versions.tf/provider.tf/variables.tf/terraform.tfvars/
+    main.tf/outputs.tf) of the two modules above, sharing infra/state-backend/'s
+    S3 bucket + DynamoDB table with a different state key
+    (environments/{dev,staging}/terraform.tfstate) - matches the bootcamp's
+    "Golden Rule: each environment gets its own state file".
+  - Kept the dev-vs-staging difference intentionally small - just enough to
+    be a genuine, defensible tier, not new complexity for its own sake:
+    cluster_name (avoids any naming collision), Karpenter capacity-type
+    (dev: spot+on-demand, staging: on-demand only), RDS multi_az (dev:
+    false, staging: true - the same knob the bootcamp's own database-layer
+    example calls out by name), and addon replica counts (dev: 1, staging:
+    2). VPC CIDR, AZ count, single-NAT strategy, RDS instance class, and
+    node instance types stay identical - no reason to invent extra
+    differentiators the teacher's note didn't ask for.
+  - Explicitly did NOT adopt Terragrunt for this - the bootcamp material
+    itself frames it as solving pain from 3+ near-identical environments,
+    and calls adopting it before that pain exists its own anti-pattern.
+    Each environment's ~35-line provider.tf duplication is the one piece
+    plain Terraform genuinely cannot deduplicate (provider config must live
+    in the root); documented as a known, accepted gap in
+    infra/environments/README.md, revisit only if a third environment is
+    ever added.
+  - infra/main/'s old state key (main/terraform.tfstate) was empty at the
+    time of this restructure (confirmed via `terraform state list` before
+    starting), so this was a clean cutover to the new
+    environments/dev/terraform.tfstate key, not a state migration.
+  - Updated all infra/main references across the repo (infra/state-backend/'s
+    README.md/main.tf/outputs.tf/versions.tf, helm/calendar/charts/backend/
+    values.yaml's metrics-server comment) to point at the new module/
+    environment paths.
+  - Added README.md to infra/environments/ (dev-vs-staging comparison table,
+    usage, why the provider.tf duplication is accepted) and to each new
+    module (inputs/outputs) - matches the bootcamp's own "no README -
+    undocumented modules are landmines" guidance.
+  - Verification done via terraform init/validate/plan only (not apply) in
+    both environments - deliberately avoided a real apply for this
+    structural change alone, given real AWS cost; applying dev/staging for
+    real is a separate follow-up.
+
+4h DONE (2026-07-17) - dropped DynamoDB state locking for native S3
+   locking:
+  - Noticed AWS console now surfaces S3 Object Lock as a bucket option;
+    checked whether it should replace the DynamoDB lock table. Clarified
+    first that Object Lock (WORM/compliance retention) is NOT the
+    mechanism involved - the real upgrade is Terraform 1.10's own
+    `use_lockfile` S3 backend setting (an atomic conditional PutObject
+    creates a companion .tflock object), which is what the deprecation
+    warning seen during 4g's `terraform plan` ("dynamodb_table is
+    deprecated, use use_lockfile instead") was actually pointing at.
+    Object Lock would have been the wrong fit - a retention policy on the
+    bucket would risk blocking the state file's own overwrites.
+  - Confirmed installed Terraform (v1.15.7) comfortably exceeds the 1.10
+    floor before changing anything.
+  - infra/state-backend/main.tf: removed aws_dynamodb_table.locks and its
+    lock_table_name local entirely - locking is now purely a client-side
+    backend setting, nothing left to provision. outputs.tf: removed
+    lock_table_name output to match.
+  - infra/environments/dev/versions.tf and staging/versions.tf: backend
+    "s3" blocks swapped `dynamodb_table = "calendar-terraform-locks"` for
+    `use_lockfile = true`; required_version bumped from >= 1.5 to >= 1.10
+    on both (state-backend/versions.tf itself left at >= 1.5 since it
+    uses local state and never touches use_lockfile).
+  - Updated all README/comment references to the old bucket+table pairing
+    (infra/state-backend/README.md, infra/environments/README.md,
+    infra/bootstrap/README.md + versions.tf) to reflect S3-only.
+  - Re-validated all three stacks (state-backend, dev, staging) via
+    terraform validate after the edits - all pass; dev/staging backend
+    re-init confirmed the deprecation warning is gone.
+  - Applied for real in infra/state-backend/ (the one stack in this repo
+    meant to be applied once and left running) - plan showed exactly one
+    resource to destroy (aws_dynamodb_table.locks, no bucket/policy
+    changes), applied, and confirmed via `aws dynamodb list-tables` that
+    the table is actually gone from the account, not just out of
+    Terraform's state.
+  - Also used this session to confirm the earlier AWS "OperationNotPermitted"
+    load-balancer-creation restriction is still active on this account
+    (tested with a real, immediately-failed create-load-balancer call, not
+    just re-reading the old error) - despite the terraform-bootstrap IAM
+    user now being 11+ days old, so it isn't purely the 24-48h new-account
+    timer; likely needs an AWS Support case to lift. Blocks a real
+    dev/staging apply from reaching the ingress-nginx/NLB step until
+    resolved - noted as an open blocker, not yet pursued.
+
+4i DONE (2026-07-18) - real end-to-end apply of infra/environments/dev/,
+   proving the whole Step 4g/4h design against a second AWS account:
+  - The primary account's load-balancer restriction (4h) was still active
+    when re-checked at the start of this session - confirmed via a second
+    real create-load-balancer attempt, same OperationNotPermitted error.
+    Rather than wait on an AWS Support case, tested against a second,
+    already-available AWS account ("calendar-alt") instead - confirmed
+    NLB creation actually works there via a real create/delete round trip
+    before investing further.
+  - Scoped deliberately as a temporary, local-only detour, not a permanent
+    account switch: only local Terraform applies move to calendar-alt's
+    credentials (via a named AWS CLI profile + AWS_PROFILE env var, the
+    standard credential-chain mechanism - no code changes needed for this
+    part). infra/bootstrap/ and GitHub Actions CI's OIDC role/ECR repos
+    stay on the original account untouched.
+  - infra/state-backend/'s S3 bucket is account-scoped by name
+    (calendar-terraform-state-<account_id>), so calendar-alt needed its
+    own copy of that bucket - applied via a Terraform *workspace*
+    (`terraform workspace new calendar-alt`), not a second directory or a
+    hacky bucket-name override; workspaces are the built-in mechanism for
+    multiple independent state files under one local-backend config.
+    infra/environments/dev/versions.tf's backend "s3" bucket was then
+    temporarily repointed at the new bucket (marked with a # TEMP
+    comment) - reverting this, and destroying the calendar-alt resources,
+    is tracked as explicit follow-up, not done as part of this entry.
+  - Ran the full phased apply for real for the first time: `apply -target
+    module.cluster` (62 resources - VPC/EKS/node group/KMS/addons, ~13min,
+    clean), then full `apply` (Karpenter, AWS Load Balancer Controller,
+    ingress-nginx, RDS).
+  - Two real, live-discovered IAM policy gaps found and fixed in
+    infra/modules/platform-addons/ingress-nginx.tf's AWS Load Balancer
+    Controller policy (same class of gap as the two already documented
+    inline there from Step 4e - a copied reference IAM policy that
+    doesn't fully match what controller v3.4.1 actually calls):
+    1. elasticloadbalancing:AddTags/RemoveTags's resource list covered
+       targetgroup/loadbalancer ARNs but not listener/listener-rule ARNs -
+       the controller tags a listener via a separate AddTags call right
+       after creating it, not inline on CreateListener.
+    2. elasticloadbalancing:DescribeListenerAttributes was missing
+       entirely from the read-only Describe* statement - a newer ELBv2
+       API (listener-level idle-timeout attributes) that predates the
+       original reference material.
+  - Real operational gotcha hit twice, independent of the IAM gaps
+    themselves: once a helm_release resource is in Helm's own "failed"
+    state, Terraform's helm provider does uninstall-then-reinstall on the
+    next apply - and that uninstall got stuck twice on
+    DeleteSecurityGroup: DependencyViolation, because AWS's ENI-detachment
+    bookkeeping lags a few seconds behind the load balancer actually being
+    deleted. The AWS Load Balancer Controller's own reconcile loop did NOT
+    retry promptly on its own once that error hit (~8+ min observed with
+    no further attempt). Fix both times: confirm via `aws ec2
+    describe-network-interfaces --filters Name=group-id,...` that the
+    security group's dependents have actually cleared, then `kubectl
+    delete pod -n kube-system -l app.kubernetes.io/name=aws-load-balancer-
+    controller` to force the controller to resync its full watch cache -
+    NOT deleting the stuck Service/finalizer directly (that would skip the
+    controller's own AWS-side cleanup, the same class of mistake already
+    hit and documented once before in this project).
+  - Verified fully working end-to-end after the fixes: real NLB with a
+    live AWS hostname, curl against it returns HTTP 404 from nginx itself
+    (proof the full path - DNS, NLB, target group, ingress-nginx pod - all
+    actually works, just nothing deployed to `/` yet), all pods Running
+    across ingress-nginx/karpenter/kube-system, RDS instance `available`.
 
 ============================================================
 STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
 ============================================================
-- Base step: install kube-prometheus-stack in the cluster (via Argo CD from
-  Step 3) to get default cluster/node monitoring, Prometheus, Alertmanager,
-  and Grafana out of the box.
+Reviewed and clarified before starting any implementation (per project convention).
+
+- Deploy mechanism decided WITH the user (2026-07-18): Terraform, not Argo CD - a new
+  helm_release resource in infra/modules/platform-addons/, applied in the same
+  `terraform apply` as the cluster itself. Matches this repo's existing precedent for
+  every other platform addon (Karpenter, AWS Load Balancer Controller, ingress-nginx -
+  all Terraform helm_release, not GitOps) and matches the bootcamp reference material's
+  own approach (examples/01-prometheus-operator.tf). The original draft below assumed
+  Argo CD (matching how the calendar app itself is deployed); rejected because Argo CD
+  in this repo is specifically for the app workload, which changes on every CI push and
+  benefits from continuous reconciliation - kube-prometheus-stack doesn't change with
+  app code, it's part of the cluster's baseline the same way Karpenter is.
+- Base step: install kube-prometheus-stack in the cluster to get default cluster/node
+  monitoring, Prometheus, Alertmanager, and Grafana out of the box.
 - Down the road, extend beyond the stack's default monitoring for the app's
   own services:
   - Add ServiceMonitor resources as new templates in the umbrella chart
@@ -355,4 +845,477 @@ STEP 5 — Observability: kube-prometheus-stack (Prometheus + Grafana)
   request/latency/error counters — build it in ahead of time even though
   nothing scrapes it yet.
 
-(Awaiting further detail/confirmation on this step before moving to implementation.)
+5a DONE (2026-07-18) - kube-prometheus-stack base install:
+  - infra/modules/platform-addons/monitoring.tf: new helm_release
+    "kube_prometheus_stack", namespace "monitoring" (create_namespace =
+    true). Bootcamp reference material pinned 57.0.0 - checked actual
+    current via `helm search repo prometheus-community/kube-prometheus-stack
+    --versions`: 87.17.0. No IAM policy/IRSA needed for this addon, unlike
+    Karpenter/the ALB controller above it in this module - Prometheus only
+    talks to the Kubernetes API via its own in-cluster ServiceAccount/RBAC
+    (provisioned by the chart itself), never AWS APIs directly.
+  - Deliberately no PersistentVolumes for Prometheus/Grafana - consistent
+    with this stack's existing ephemeral-by-design posture (RDS skips
+    backups and the final snapshot too, see rds.tf) since the whole
+    environment is destroyed at the end of every working session anyway.
+    Prometheus retention trimmed to 3d (chart default 10d) to match.
+  - serviceMonitorSelectorNilUsesHelmValues/podMonitorSelectorNilUsesHelmValues
+    set false in prometheusSpec - lets Prometheus pick up ServiceMonitor/
+    PodMonitor CRDs anywhere in the cluster, not just ones carrying this
+    Helm release's own label. Needed ahead of time for the next Step 5
+    piece (the app's own ServiceMonitor will live in a different Helm
+    release - the calendar chart, not this one).
+  - Grafana admin password: random_password resource (same pattern as
+    rds.tf's DB password), surfaced via a new sensitive
+    grafana_admin_password output (module -> environment, both dev and
+    staging) rather than the bootcamp reference's hardcoded "changeme".
+  - timeout = 600 on the helm_release (vs the 300s default used elsewhere
+    in this file) - this chart installs far more at once (CRDs, operator,
+    Prometheus, Alertmanager, Grafana, node-exporter DaemonSet,
+    kube-state-metrics) than ingress-nginx or Karpenter do.
+  - Applied for real against the calendar-alt account's already-running
+    dev cluster (same session as Step 4i) - clean on the first try, zero
+    IAM issues (unlike ingress-nginx's two rounds of fixes), all 7 pods
+    Running within ~2 minutes. Real, live confirmation of Karpenter
+    actually doing its job: it provisioned a second node on its own to
+    absorb the extra scheduling load, unprompted. Verified Grafana itself
+    is reachable via `kubectl port-forward` + a curl against /login (HTTP
+    200), and the password output resolves correctly.
+
+5b DONE (2026-07-18) - backend /metrics endpoint (prom-client), ahead of
+   the ServiceMonitor that will scrape it:
+  - backend/package.json: added prom-client (checked actual current via
+    `npm view prom-client version`: 15.1.3, not assumed).
+  - backend/metrics.js: a dedicated Registry (not the global default
+    registry) holding collectDefaultMetrics() (free process/runtime
+    metrics - CPU, memory, event-loop lag, GC - zero extra code) plus two
+    custom metrics, matching the bootcamp's own Counter+Histogram pattern
+    exactly: http_requests_total (Counter) and http_request_duration_seconds
+    (Histogram), both labeled method/route/status_code. One metric type
+    deliberately NOT used: Summary - the bootcamp material's own rule of
+    thumb is prefer Histogram, since Summary's quantiles are computed
+    client-side and can't be aggregated across pods the way Histogram's can.
+  - Real care point, not just following the pattern blindly: labels use
+    req.route.path (the matched Express route pattern, e.g.
+    "/api/events/:id"), never the raw request path - using the raw path
+    would create a new label combination per unique ID and blow up
+    Prometheus's cardinality. req.route is only populated once Express has
+    finished matching, so this has to be read inside a res.on("finish")
+    handler (fires after the response is sent), not in the middleware body
+    up front. Falls back to the literal label "unmatched" for 404s, so
+    scanning/bot traffic against random URLs can't create unbounded label
+    values either.
+  - app.js: metricsMiddleware wired in (times every request via
+    process.hrtime.bigint(), records on "finish"), metricsHandler mounted
+    at GET /metrics (Prometheus's standard convention, not app.get
+    ("/api/metrics", ...) - deliberately outside the /api prefix since
+    Prometheus's ServiceMonitor will scrape the Service directly,
+    in-cluster, bypassing the Ingress entirely, unlike every other backend
+    route which IS reached through the /api Ingress path).
+  - Note: this means CLAUDE.md's Architecture section ("everything the
+    backend serves lives under that prefix, including /api/health") is now
+    slightly stale - /metrics is a deliberate, documented exception, not an
+    oversight, but the doc text itself hasn't been updated to say so yet.
+  - Verified for real, not just "should work": ran the existing test suite
+    unchanged (17/17 still pass - this feature adds a route, touches
+    nothing existing), then started the server against a real local
+    Postgres and curled /metrics directly - confirmed http_requests_total
+    and http_request_duration_seconds_count both appear with correctly
+    matched-route labels for /api/health and /api/users/, and a genuine
+    404 against a nonexistent path correctly falls back to the
+    route="unmatched" label instead of leaking the raw bogus path.
+
+5c DONE (2026-07-18) - backend ServiceMonitor, wiring Prometheus to actually
+   scrape the Step 5b /metrics endpoint:
+  - Homed in charts/backend/templates/servicemonitor.yaml, not a
+    parent-level template - matches the Step 6 precedent of each subchart
+    owning everything about itself (PDB, Ingress, HPA are all subchart-
+    owned already), even though workplan's own wording said "umbrella
+    chart" loosely. Confirmed monitoring.coreos.com/v1 (not v1beta1) is
+    what's actually installed on the live cluster before writing the
+    apiVersion, not assumed.
+  - charts/backend/templates/service.yaml: added `name: http` to the
+    Service's port - ServiceMonitor endpoints should reference a named
+    port, not a raw port number, and the Service had none before this.
+  - ServiceMonitor's spec.selector.matchLabels matches the Service's own
+    metadata.labels (backend.labels - name/instance/component), not the
+    pod selector - a ServiceMonitor selects Services first, then follows
+    each Service's own selector to find pods, a distinction worth being
+    deliberate about rather than copy-pasting the pod selector by habit.
+  - New serviceMonitor.enabled/path/interval values block in
+    charts/backend/values.yaml (default enabled: true) - gated the same
+    way autoscaling already is, and for the same shape of reason: applying
+    a ServiceMonitor with no Prometheus Operator CRDs installed doesn't
+    just sit inert like an HPA with no metrics-server does, it fails
+    outright (the CRD doesn't exist). Added serviceMonitor.enabled: false
+    to both local-dev/values-kind*.yaml alongside the existing
+    autoscaling.enabled: false for the same reason.
+  - Verified via `helm lint` (0 failures) and `helm template` against both
+    value sets: default values render a ServiceMonitor with correctly
+    matched labels/selector/named-port/path; values-kind.yaml renders zero
+    ServiceMonitor objects.
+  - One real, live check against the already-running calendar-alt cluster
+    (not fabricated): confirmed via `kubectl get prometheus -n monitoring
+    -o jsonpath=...` that the live Prometheus CR's serviceMonitorSelector
+    AND serviceMonitorNamespaceSelector are both {} (empty) - i.e. it
+    already watches ServiceMonitors in every namespace with no label
+    restriction, exactly matching what 5a's
+    serviceMonitorSelectorNilUsesHelmValues=false setting was meant to
+    produce, confirmed rather than assumed.
+  - Explicitly NOT verified: an actual live scrape of the real backend's
+    /metrics (Prometheus target showing "up" with real samples). The
+    calendar app itself has never been deployed to this EKS cluster -
+    Argo CD isn't wired to an EKS target yet (only
+    local-dev/values-kind-ecr.yaml against kind, see CLAUDE.md), and the
+    backend's image lives in the ORIGINAL account's ECR, not calendar-
+    alt's, so it isn't pullable there without cross-account repository
+    permissions that don't exist. Deliberately did not fabricate a
+    stand-in pod just to produce a "scrape succeeded" checkmark - that
+    would prove less than it looks like. Real end-to-end scrape
+    verification is deferred to whenever the app itself is actually
+    deployed to a real EKS cluster (a separate, larger, not-yet-done
+    piece), same "not yet applied" honesty this project uses throughout.
+
+4j DONE (2026-07-18) - real terraform destroy of calendar-alt's dev
+   environment, deliberately verified rather than assumed clean:
+  - Motivation: this project's whole dev/staging design assumes `apply ->
+    verify -> destroy` is reliable every session (see infra/environments/
+    README.md) - with a live cluster already up, worth actually proving
+    that before trusting it for real on the primary account later, rather
+    than assuming it from the plan/apply successes alone.
+  - First destroy attempt failed exactly as feared: the ingress-nginx
+    helm_release uninstall hit the same DeleteSecurityGroup:
+    DependencyViolation timeout seen twice during apply (Step 4i/17) - but
+    this time nothing was left alive to retry it (see next point), so it
+    left a REAL orphaned NLB + 2 target groups + 2 security groups in AWS,
+    entirely outside Terraform's state (the ALB controller creates these
+    directly via the AWS API - Terraform never has their IDs). Those
+    orphans then blocked `terraform destroy` on the VPC's public
+    subnets/Internet Gateway (DependencyViolation / "has some mapped
+    public address(es)").
+  - Root cause distinct from every earlier stuck-reconcile incident this
+    session: by the time the uninstall got stuck, the EKS node group had
+    ALREADY been destroyed, so the AWS Load Balancer Controller's own pod
+    was stuck Pending (0/2 then 0/1 nodes available) with nowhere to run -
+    there was no live in-cluster process left that could ever finish the
+    cleanup on its own, unlike the two apply-time incidents where
+    restarting the controller pod was enough.
+  - Fixed by hand, in order: `aws elbv2 delete-load-balancer` (confirmed
+    ARN first via describe-load-balancers), then `delete-target-group` x2,
+    then `delete-security-group` on both ALB-controller-managed SGs
+    (checking `describe-network-interfaces --filters Name=group-id,...`
+    showed zero dependents on each before deleting) - not `-target` or
+    state manipulation, since these resources were never in Terraform's
+    state to begin with.
+  - Retried `terraform destroy` - got further, but stalled again on the
+    node/cluster security groups and a private subnet. Root cause #2,
+    genuinely different again: a live, `running` EC2 instance
+    (i-0103e823b3c16f9ac, tagged karpenter.sh/nodepool=general-purpose) -
+    the second node Karpenter provisioned during Step 5a's kube-
+    prometheus-stack install, entirely outside Terraform's state (Karpenter
+    creates EC2 instances directly, not through Terraform), orphaned the
+    same way the NLB was once Karpenter's own controller was destroyed
+    before it could clean up its own node. Fixed with `aws ec2
+    terminate-instances`.
+  - Retried again - VPC itself then stalled ~10min with two more leftover,
+    non-Terraform-managed security groups: the same ALB-controller SG
+    pattern recurring (a second `k8s-traffic-...` SG, from the same
+    ingress-nginx reinstall cycle logged in Step 4i/17) AND an
+    EKS-auto-created "cluster security group" (eks-cluster-sg-calendar-
+    dev-...) that AWS itself provisions alongside the cluster and normally
+    auto-deletes when the cluster does, but hadn't yet. Deleted both by
+    hand once confirmed zero ENI dependents on each; the VPC delete (which
+    the AWS provider retries internally on DependencyViolation) then
+    succeeded on its own next retry without needing to restart Terraform.
+  - Real, load-bearing conclusion for this project's core dev/staging
+    design: `terraform destroy` alone is NOT reliably clean for this
+    stack as built - three separate categories of out-of-band AWS
+    resource (ALB-controller-created LB/SGs, Karpenter-created EC2
+    instances, EKS-auto-created cluster SG) can all outlive the
+    Terraform-managed resources they depend on if a controller's own pod
+    loses its compute mid-cleanup, and none of them are visible to
+    `terraform state list` to explain why a destroy is stuck. Documented
+    here rather than silently worked around, since every future
+    `apply`/`destroy` cycle on dev or staging should expect this same
+    failure mode is possible, not assume this session's manual fixes were
+    a one-off.
+  - Verified via a full post-destroy AWS sweep (not just `terraform state
+    list` showing 0, which only proves Terraform's own bookkeeping):
+    describe-vpcs (only the account's own default VPC left),
+    describe-instances (none), describe-db-instances (none),
+    elbv2 describe-load-balancers (none), eks list-clusters (none).
+  - infra/environments/dev/versions.tf's backend bucket reverted back to
+    the primary account (672299759593) now that calendar-alt testing for
+    this session is done, matching the same TEMP-then-revert pattern used
+    earlier in Step 4i.
+
+============================================================
+STEP 6 — Helm chart hardening + reusable GitHub Actions
+============================================================
+Prompted by feedback from the user's course teacher (2026-07-14), reviewed and clarified
+before starting any implementation (per project convention - discuss the concept + the "why
+here" before touching code).
+
+- Add a PodDisruptionBudget per subchart (backend/frontend) - caps how many replicas can be
+  voluntarily taken down at once (node drain, cluster upgrade, Karpenter consolidation),
+  so a rolling maintenance action can't take an app fully offline.
+- Split the single parent-level Ingress (helm/calendar/templates/ingress.yaml) into two
+  separate Ingress resources, one owned by each subchart (frontend: "/", backend: "/api" and
+  "/health") - decided over just relocating the combined Ingress unchanged, specifically to
+  make Ingress ownership consistent with how Deployment/Service already work in this chart
+  (each subchart owns everything about itself). Verified safe under this project's NLB +
+  ingress-nginx design (Step 4e) specifically: ingress-nginx merges multiple Ingress objects
+  for the same class into one NGINX config, so this does NOT risk provisioning two load
+  balancers the way splitting a raw ALB Ingress could (without an explicit IngressGroup
+  annotation). Accepted trade-off: shared values (hostname, TLS secret name) now need to be
+  duplicated across both subcharts' values.yaml, or read through the existing global: key
+  pattern (same one already used for backend.servicePort) - not defined once.
+- Add a HorizontalPodAutoscaler per subchart (CPU/memory-based) - scales replica COUNT based
+  on load, distinct from and complementary to Karpenter (which scales NODES based on
+  unschedulable pods). Needs metrics-server present in the cluster to have anything to read -
+  verify this before wiring HPAs that would otherwise sit inert.
+- Split the backend's env vars into ConfigMap (non-sensitive config) vs. Secret (DATABASE_URL/
+  credentials) - the backend currently has no ConfigMap at all (only the frontend does, for
+  nginx.conf). Explicitly NOT External Secrets Operator/AWS Secrets Manager for this step -
+  that's still the deliberately deferred future step from workplan.txt Step 4f, tied to when
+  the AI-integration work introduces a real static app secret worth building that plumbing
+  for.
+- Introduce reusable GitHub Actions (composite action and/or reusable workflow) for the
+  shared opening of backend-ci.yml/frontend-ci.yml (checkout, setup-node, npm ci, AWS OIDC
+  auth, ECR login/push). Real, explicit revisit of a prior decision: Step 1b decided AGAINST
+  this at the time ("not worth it at this size... revisit if a third workflow/project
+  appears") - nothing has changed size-wise since then (still 2 workflows), so this is being
+  done now specifically for practice and as deliberate groundwork for future CI pipelines
+  (calendar-sync proxy, AI integration), not because the original reasoning was wrong.
+
+Sub-step order: pick one piece at a time, per usual.
+
+6a DONE (2026-07-14) - PodDisruptionBudget per subchart:
+  - charts/backend/templates/pdb.yaml + charts/frontend/templates/pdb.yaml,
+    each gated by a new podDisruptionBudget.enabled values key (matching the
+    chart's existing ingress.enabled/migration.enabled toggle convention),
+    selector matching that subchart's own Deployment labels.
+  - Deliberately maxUnavailable: 1, not minAvailable - local-dev/values-kind.yaml
+    and values-kind-ecr.yaml both override replicaCount to 1, and
+    minAvailable:1 at 1 replica would block ALL voluntary eviction
+    (Karpenter consolidation, node drain) permanently, since evicting the
+    only pod would violate it. maxUnavailable:1 behaves correctly at any
+    replica count instead - verified via `helm template` against both the
+    default values (replicaCount 2) and values-kind.yaml (replicaCount 1),
+    both render maxUnavailable: 1 correctly. `helm lint` passes, 0 failures.
+
+6b DONE (2026-07-14) - per-subchart Ingress split:
+  - Verified against the bootcamp reference material
+    (07-aws/04-ingress-and-gateway-api/) before implementing: its own
+    examples consistently route path-based traffic (e.g. /api) directly to
+    a backend Service at the Ingress/Gateway-API level (an HTTPRoute example
+    splits /api -> api-service, / -> web-service) - it never shows or
+    discusses this project's prior in-container nginx proxy_pass pattern.
+    Material doesn't explicitly argue one approach is better, but the
+    reasoning for switching stands independently: avoids running two L7
+    proxies doing the same path-routing job (ingress-nginx AND frontend's
+    own nginx), removes a network hop for every API call, and makes API
+    traffic visible to the Ingress controller as its own thing (per-path
+    annotations/rate-limiting become possible, weren't before).
+  - Real correction caught before implementing: initial plan assumed a
+    generic "/api" + "/health" split (based on a different student's
+    example project). Checked this repo's actual backend/app.js first -
+    EVERYTHING is mounted under /api, including health at /api/health - so
+    only ONE path rule (/api, Prefix) is needed on the backend Ingress, not
+    two.
+  - helm/calendar/templates/ingress.yaml (parent-level, single combined
+    Ingress) removed entirely. Replaced with
+    charts/backend/templates/ingress.yaml (/api prefix -> backend Service)
+    and charts/frontend/templates/ingress.yaml (/ prefix -> frontend
+    Service) - each subchart now owns its own Ingress, consistent with how
+    Deployment/Service already work in this chart.
+  - Shared config (className, host, tls) both Ingresses must agree on moved
+    into the parent's global.ingress key (parent's values.yaml comment
+    updated - this is now the SECOND genuine cross-subchart value, not the
+    first). Each subchart keeps its own local ingress.enabled toggle.
+  - frontend/nginx.conf: removed the /api/ proxy_pass block entirely - the
+    Ingress controller routes API traffic straight to the backend Service
+    now, this container only ever serves static assets + the SPA fallback.
+  - local-dev/values-kind.yaml and values-kind-ecr.yaml: updated their
+    ingress-disabling override from the old parent-level `ingress.enabled`
+    key (now dead/silently ignored) to the new per-subchart
+    `backend.ingress.enabled` / `frontend.ingress.enabled` keys - caught by
+    checking these files explicitly, not assumed.
+  - templates/NOTES.txt also referenced the old parent-level
+    `.Values.ingress.enabled`/`.host` - updated to
+    `.Values.frontend.ingress.enabled` / `.Values.global.ingress.host`.
+  - CLAUDE.md's architecture section updated (frontend/backend routing
+    description, and the "one genuine cross-subchart value" line, now two).
+  - Verified via `helm lint` (0 failures) and `helm template` against both
+    default values (renders exactly 2 Ingress objects, correct paths/
+    className) and local-dev/values-kind.yaml (renders zero Ingress
+    objects, both disabled) - and NOTES.txt renders correctly
+    ("App URL: http://<NLB hostname>" with the default empty host).
+
+6c DONE (2026-07-14) - ConfigMap/Secret split for backend env vars:
+  - charts/backend/templates/configmap.yaml: new, holds .Values.env
+    (currently just PORT) as a real ConfigMap object instead of inline
+    literal values baked directly into the Pod template.
+  - charts/backend/templates/deployment.yaml: switched from a `range
+    .Values.env` loop rendering inline `env:` entries to `envFrom:
+    configMapRef` pointing at the new ConfigMap. DATABASE_URL untouched -
+    it was already correctly a Secret reference (calendar-db-credentials,
+    created externally by Terraform's rds.tf, never by this chart).
+  - Real gotcha applied proactively (already hit and solved once before,
+    for the frontend's nginx ConfigMap): a Deployment only references a
+    ConfigMap by NAME, so a content-only change wouldn't trigger a
+    rollout on its own. Added the same checksum/config annotation trick
+    the frontend subchart already uses, so a config change still rolls
+    pods.
+  - Checked templates/migration-job.yaml for the same issue before
+    considering this done - it only ever used DATABASE_URL (the Secret),
+    never .Values.env/PORT, so no change was needed there.
+  - Verified via `helm lint` (0 failures) and `helm template` - ConfigMap
+    renders with PORT: "3001", Deployment shows envFrom/configMapRef
+    wired to it, and a real checksum/config hash is present.
+
+6d DONE (2026-07-14) - reusable GitHub Actions:
+  - Two different sharing mechanisms used deliberately for two different
+    shapes of duplication:
+    - .github/actions/setup-workspace/action.yml (composite action) - the
+      few shared opening steps (Node setup + `npm ci`) inside backend-ci's
+      `test` job and frontend-ci's `build` job, which otherwise diverge
+      (migrate+test vs lint+build) - a composite action runs in the SAME
+      job/runner as the caller, so it's for sharing a handful of steps
+      within jobs that aren't themselves identical.
+    - .github/workflows/build-and-push.yml (reusable workflow,
+      `on: workflow_call`) - the entire build-and-push job, nearly
+      byte-identical between backend/frontend except image name/Dockerfile
+      path/chart values path/commit scope, now parameterized via `inputs:`.
+      A reusable workflow replaces a whole job (`uses:` instead of
+      `steps:`), runs as its own separate job/runner - the right tool when
+      the ENTIRE job is shared, not just an opening sequence.
+  - Real gotcha caught before it could break CI: a local-path composite
+    action (`uses: ./path`) can only be resolved by the runner AFTER the
+    repo is already checked out - so `actions/checkout` cannot live INSIDE
+    setup-workspace/action.yml (that's circular); it has to run in the
+    caller job first, then `uses: ./.github/actions/setup-workspace`
+    second. Composite action `run:` steps also need an explicit `shell:`
+    key (not implied like in normal workflow steps, unlike normal
+    workflow-level steps).
+  - Confirmed vars.AWS_REGION/vars.AWS_GITHUB_ACTIONS_ROLE_ARN (repository
+    Variables, not secrets) are automatically available to a same-repo
+    reusable workflow call with no explicit passing needed - only
+    `secrets:` require that, and this job uses none (OIDC token auth only).
+  - Real gap caught and fixed: neither workflow's `paths:` filter included
+    the two new shared files - a change to build-and-push.yml or the
+    composite action wouldn't have triggered either CI to actually verify
+    it. Added `.github/workflows/build-and-push.yml` and
+    `.github/actions/setup-workspace/**` to both backend-ci.yml's and
+    frontend-ci.yml's `paths:` lists.
+  - Verified all 4 files (2 modified workflows, 1 new reusable workflow, 1
+    new composite action) parse as valid YAML (PyYAML). Real end-to-end
+    proof (an actual push triggering both workflows successfully through
+    the new shared pieces) still pending until merged and pushed, same
+    caveat as every other YAML-validated-but-not-yet-run CI change in this
+    project.
+  - This was an explicit, deliberate revisit of Step 1b's original decision
+    against this exact thing ("not worth it at this size") - done now for
+    practice and as groundwork for future CI pipelines (calendar-sync
+    proxy, AI integration), not because the original reasoning was wrong
+    at 2 workflows.
+
+6e DONE (2026-07-14) - HorizontalPodAutoscaler per subchart:
+  - infra/main/eks.tf: added metrics-server to cluster_addons - confirmed
+    it's a real, available EKS-managed addon via `aws eks
+    describe-addon-versions --addon-name metrics-server` first, not
+    assumed. Without it, an HPA has no Metrics API to read from and just
+    shows <unknown> targets forever - checked and fixed BEFORE writing any
+    chart YAML, not discovered after applying.
+  - charts/backend/templates/hpa.yaml + charts/frontend/templates/hpa.yaml:
+    autoscaling/v2 HorizontalPodAutoscaler, gated by a new
+    autoscaling.enabled values key, targeting each subchart's own
+    Deployment. backend: min 2/max 5 replicas; frontend: min 2/max 4 -
+    both target 75% CPU utilization. Both subcharts' values.yaml updated.
+  - Real gotcha fixed proactively (known going in, not discovered by
+    breaking it first): once an HPA targets a Deployment, it owns
+    spec.replicas - if the Deployment template kept unconditionally
+    setting `replicas: {{ .Values.replicaCount }}`, every `helm upgrade`
+    would briefly fight whatever count the HPA had actually scaled to.
+    Both charts/backend/templates/deployment.yaml and
+    charts/frontend/templates/deployment.yaml now omit `replicas:`
+    entirely when autoscaling.enabled is true (standard pattern used by
+    most production Helm charts that support HPA).
+  - local-dev/values-kind.yaml and values-kind-ecr.yaml: added
+    autoscaling.enabled: false for both subcharts, matching
+    ingress.enabled: false - kind has no metrics-server installed either.
+  - Verified via `helm lint` (0 failures) and `helm template` against both
+    value sets: default values render both HPAs with the correct
+    min/max/target AND correctly omit `replicas:` from both Deployments;
+    values-kind.yaml renders zero HPA objects AND correctly keeps
+    `replicas: 1` on both Deployments (autoscaling disabled there).
+
+STEP 6 (Helm chart hardening + reusable GitHub Actions) COMPLETE: all 5
+pieces done (6a PDB, 6b per-subchart Ingress, 6c ConfigMap/Secret split, 6d
+reusable Actions, 6e HPA). Real, live end-to-end verification (actually
+applying infra/main/ with the new metrics-server addon, and deploying the
+chart to see the HPA/PDB/Ingress/ConfigMap all work together against a real
+cluster) still pending - everything here has been verified via
+`helm lint`/`helm template`/YAML parsing only, consistent with how this
+project treats "not yet applied" work throughout.
+
+============================================================
+STEP 7 — Deploy the calendar app to real EKS via Argo CD
+============================================================
+Not yet started - planned here first, per project convention, before touching any code.
+
+Why this is the actual next priority, decided with the user (2026-07-18): Steps 4, 5, and 6 are all
+individually code-complete and validated (terraform plan/helm lint/helm template), but none of them
+has ever been proven end-to-end against a real, live app running on real EKS - only cluster/platform
+pieces have been live-verified (Step 4i/4j's calendar-alt session, Step 5's Prometheus/Grafana). The
+calendar app itself has only ever run via Argo CD against `kind`. This step closes that gap: it's
+what would let the HPA/PDB/Ingress/ConfigMap split (Step 6), the ServiceMonitor's actual scrape
+(Step 5c), and the whole environment design (Step 4g) all be verified together, against something
+real, instead of each being separately "should work."
+
+What's actually needed, worked out but not yet built:
+
+1. Argo CD itself has to be installed on the EKS cluster - it currently only runs on `kind`. The
+   ApplicationSet's `destination.server: https://kubernetes.default.svc` (argocd/applications/
+   calendar-appset.yaml) means Argo CD deploys to whatever cluster it's itself running on, not an
+   externally-registered one - so this isn't optional plumbing, it's a real prerequisite. Revisit
+   the same install gotchas hit the first time (feedback_argocd_install_gotchas: --server-side apply
+   for the large CRD, a bcrypt-hashed admin.password, never plaintext).
+
+2. A new values file for the real-EKS target - `local-dev/values-kind-ecr.yaml` is kind-specific by
+   name and content (ingress.enabled: false, autoscaling.enabled: false, ECR pull secret) so a new
+   file is needed, not a reused one. Real EKS should instead leave ingress/autoscaling/serviceMonitor
+   at their chart defaults (all enabled) and only override what's genuinely environment-specific:
+   image repository/tag (already defaulted correctly by CI's tag-bump step - see Step 3), and the
+   Ingress hostname/class to match whatever ingress-nginx's NLB actually resolves to for that
+   environment (no owned domain - same "reached directly via the NLB's own AWS-generated hostname"
+   decision already made for ingress-nginx itself, see infra/modules/platform-addons/ingress-
+   nginx.tf's comment).
+
+3. A new `elements` entry in calendar-appset.yaml's List generator - the ApplicationSet was
+   deliberately shaped for exactly this ("what makes adding a real staging/prod entry later a
+   one-line addition instead of copy-pasting a whole new Application," see that file's own comment)
+   back in Step 3.
+
+4. Confirm `backend.existingSecret: calendar-db-credentials` (the chart's default) actually matches
+   what infra/modules/platform-addons/rds.tf's kubernetes_secret creates - it should already, by
+   design (see that file's own comment), but worth confirming live rather than assuming, same
+   standard this project holds everything else to.
+
+5. A real blocker to solve, not yet solved: whichever account this targets, the backend/frontend
+   images need to actually be pullable there. The ECR repos (infra/bootstrap/) live in the PRIMARY
+   account (672299759593). If this step ends up targeting calendar-alt again (or any other
+   non-primary account) the way Step 4i/4j did, that's the same cross-account ECR problem already
+   hit and deliberately not solved in Step 5c ("the backend's image lives in the ORIGINAL account's
+   ECR... isn't pullable there without cross-account repository permissions that don't exist") -
+   needs an actual decision here (cross-account ECR repository policy vs. building/pushing to a
+   second ECR repo in that account vs. waiting for the primary account's NLB restriction to lift and
+   targeting it directly), not another deferral.
+
+Explicitly deferred, decided WITH the user (2026-07-18): no cluster is currently running on either
+account (calendar-alt was destroyed in Step 4j to stop the cost clock; the primary account's NLB
+restriction from Step 4h/4i was never rechecked this session). Rather than default to re-provisioning
+calendar-alt again or picking an account unprompted, this step's code (Argo CD bootstrap values, the
+new environment values file, the ApplicationSet entry) will be written and validated the same
+plan/template-only way Step 4f originally was - real end-to-end verification (and the account/ECR
+decision in point 5 above) picked up in a future session once a cluster is actually up again.

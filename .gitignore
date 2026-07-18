@@ -15,3 +15,13 @@ crash.log
 crash.*.log
 *.tfvars
 *.tfvars.json
+*.tfplan
+# Exception: dev/staging's terraform.tfvars hold non-secret, tracked
+# differentiators (cluster_name, capacity types, multi_az, ...) - see
+# infra/environments/README.md. Everything else stays covered by *.tfvars
+# above, e.g. any local override file with real values.
+!infra/environments/*/terraform.tfvars
+
+# Personal study notes and workbook drafts (not part of the DevOps project code)
+notes/
+workbook/

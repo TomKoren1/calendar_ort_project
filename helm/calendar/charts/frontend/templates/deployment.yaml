@@ -5,7 +5,11 @@ metadata:
   labels:
     {{- include "frontend.labels" . | nindent 4 }}
 spec:
+  # See backend/templates/deployment.yaml's comment - omitted when the HPA
+  # is enabled so Helm stops fighting the HPA's scaling decisions.
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       app.kubernetes.io/name: frontend

@@ -1,7 +1,7 @@
 Calendar chart deployed as release "{{ .Release.Name }}" in namespace "{{ .Release.Namespace }}".
 
-{{- if .Values.ingress.enabled }}
-App URL: https://{{ .Values.ingress.host }}
+{{- if .Values.frontend.ingress.enabled }}
+App URL: http{{ if .Values.global.ingress.tls.enabled }}s{{ end }}://{{ .Values.global.ingress.host | default "<NLB hostname>" }}
 {{- else }}
 Ingress is disabled. Port-forward to reach it:
   kubectl port-forward svc/{{ include "calendar.frontend.fullname" . }} 8080:{{ .Values.frontend.service.port }}

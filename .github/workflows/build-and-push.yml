@@ -1,0 +1,69 @@
+name: Build and push image
+
+# Reusable workflow (not a composite action) deliberately - this is an
+# entire job, nearly identical between backend-ci.yml and frontend-ci.yml
+# except for four things, all parameterized below via `inputs:`. Repository
+# Variables (vars.AWS_REGION, vars.AWS_GITHUB_ACTIONS_ROLE_ARN) are
+# available here automatically since this is a same-repo reusable workflow
+# call - only `secrets:` need explicit passing/inheriting, and this job
+# uses none (OIDC token auth only, no stored AWS keys).
+on:
+  workflow_call:
+    inputs:
+      image-name:
+        description: "ECR repository name, e.g. calendar-backend"
+        required: true
+        type: string
+      dockerfile:
+        description: "Path to the Dockerfile, relative to repo root"
+        required: true
+        type: string
+      chart-values-path:
+        description: "Helm subchart values.yaml to bump image.tag in"
+        required: true
+        type: string
+      commit-scope:
+        description: "Conventional-commit scope for the tag-bump commit, e.g. backend"
+        required: true
+        type: string
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+        id: ecr-login
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ inputs.dockerfile }}
+          push: true
+          tags: |
+            ${{ steps.ecr-login.outputs.registry }}/${{ inputs.image-name }}:${{ github.sha }}
+            ${{ steps.ecr-login.outputs.registry }}/${{ inputs.image-name }}:latest
+
+      - name: Bump image tag in Git (GitOps loop - Argo CD watches this file)
+        run: |
+          yq -i '.image.tag = "${{ github.sha }}"' ${{ inputs.chart-values-path }}
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ${{ inputs.chart-values-path }}
+          git commit -m "chore(${{ inputs.commit-scope }}): bump image tag to ${{ github.sha }}"
+          for i in 1 2 3; do
+            git pull --rebase origin main && git push origin HEAD:main && break
+            sleep 3
+          done
